@@ -1,5 +1,5 @@
 # -*- mode: python ; coding: utf-8 -*-
-# 机器学习哈哈 1.0 - 专业打包配置 (根据 main.py 完整需求构建)
+# 一键无忧6.0 - 专业打包配置 (根据 main.py 完整需求构建)
 import sys
 import os
 from pathlib import Path
@@ -176,7 +176,7 @@ exe = EXE(
     a.zipfiles,
     a.datas,
     [],
-    name='Python环境配置哈哈5.0',
+    name='一键无忧6.0',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

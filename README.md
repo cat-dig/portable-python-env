@@ -56,8 +56,8 @@
 
 ```bash
 # 克隆仓库
-git clone https://github.com/YOUR_USERNAME/python-portable-venv-generator.git
-cd python-portable-venv-generator
+git clone https://github.com/cat-dig/portable-python-env.git
+cd portable-python-env
 
 # 安装依赖
 pip install customtkinter requests pillow

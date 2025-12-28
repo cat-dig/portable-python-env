@@ -3,8 +3,33 @@
 > **一键配置 Python 虚拟环境，告别依赖地狱！**
 
 ![Python](https://img.shields.io/badge/Python-3.9+-blue.svg)
-![Platform](https://img.shields.io/badge/Platform-Windows-lightgrey.svg)
+![Platform](https://img.shields.io/badge/Platform-Windows_x64_Only-red.svg)
 ![License](https://img.shields.io/badge/License-MIT-green.svg)
+
+## ⚠️ 重要：系统兼容性说明
+
+### 仅支持 Windows x64
+
+本工具**仅适用于 Windows x64 系统**，不支持：
+- ❌ macOS
+- ❌ Linux
+- ❌ Windows 32位 (x86)
+- ❌ Windows ARM
+
+### 跨电脑复制使用的前提条件
+
+如果你想将配置好的项目文件夹复制到另一台电脑直接使用，需要满足以下条件：
+
+| 条件 | 说明 |
+|------|------|
+| ✅ 同操作系统 | 目标电脑也必须是 **Windows x64** |
+| ✅ 同架构 | 必须是 64位系统 |
+| ⚠️ 路径兼容 | 建议保持**相同的目录结构**（如都放在 `D:\Projects\`） |
+| ⚠️ 盘符问题 | 虚拟环境中的某些路径可能是绝对路径，换盘符可能失效 |
+
+**最佳实践**：在新电脑上重新运行本工具配置环境，而不是直接复制 `.venv` 文件夹。
+
+---
 
 ## ✨ 核心特性
 

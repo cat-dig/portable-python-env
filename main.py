@@ -1,6 +1,6 @@
 # main.py
 # -*- coding: utf-8 -*-
-# 一键无忧哈哈 - Python 环境自动配置工具
+# 一键无忧6.0 - Python 环境自动配置工具
 
 import sys
 import os
@@ -34,13 +34,9 @@ def show_splash():
     
     # 设置背景和文字 - 四句话四行
     splash.configure(bg="#1a1a2e")
-    tk.Label(splash, text="朋友们，", font=("Microsoft YaHei", 14, "bold"), 
-             fg="#4fc3f7", bg="#1a1a2e").pack(pady=(15, 0))
-    tk.Label(splash, text="什么他妈的理想啊？", font=("Microsoft YaHei", 14, "bold"), 
-             fg="#4fc3f7", bg="#1a1a2e").pack()
-    tk.Label(splash, text="生命是短暂的，", font=("Microsoft YaHei", 14, "bold"), 
-             fg="#4fc3f7", bg="#1a1a2e").pack()
-    tk.Label(splash, text="让我们干杯！", font=("Microsoft YaHei", 14, "bold"), 
+    tk.Label(splash, text="终不似。", font=("Microsoft YaHei", 16, "bold"), 
+             fg="#4fc3f7", bg="#1a1a2e").pack(pady=(30, 5))
+    tk.Label(splash, text="少年游", font=("Microsoft YaHei", 16, "bold"), 
              fg="#4fc3f7", bg="#1a1a2e").pack()
     
     splash.update()
@@ -259,6 +255,7 @@ class PythonEnvManager:
                     self.system_python_path = data.get('system_python_path', None)
                     self.downloaded_python_version = data.get('downloaded_python_version', None)
                     self.python_mirror = data.get('python_mirror', 'huawei')
+                    self.theme = data.get('theme', 'Light')
                     if self.use_system_python and self.system_python_path:
                         self.python_exe_path = Path(self.system_python_path)
             except: pass
@@ -267,6 +264,7 @@ class PythonEnvManager:
             self.system_python_path = None
             self.downloaded_python_version = None
             self.python_mirror = 'huawei'
+            self.theme = 'Light'
             # 只有在工具目录确定后才能设置默认路径
             if PYTHON_DIR:
                 self.python_exe_path = PYTHON_DIR / 'python.exe'
@@ -278,7 +276,8 @@ class PythonEnvManager:
             'use_system_python': self.use_system_python,
             'system_python_path': str(self.system_python_path) if self.system_python_path else None,
             'downloaded_python_version': self.downloaded_python_version,
-            'python_mirror': self.python_mirror
+            'python_mirror': self.python_mirror,
+            'theme': getattr(self, 'theme', 'Light')
         }
         try:
             with open(SETTINGS_FILE, 'w', encoding='utf-8') as f: json.dump(data, f)
@@ -2021,7 +2020,7 @@ class EnvManagerWindow(ctk.CTkToplevel):
 class HelpWindow(ctk.CTkToplevel):
     def __init__(self, parent):
         super().__init__(parent)
-        self.title("Python环境配置哈哈 4.0 - 使用手册")
+        self.title("一键无忧6.0 - 使用手册")
         self.geometry("700x750")
         
         # 窗口置顶和模态设置
@@ -2281,7 +2280,7 @@ class App(ctk.CTk):
             _splash = None
 
     def setup_ui(self):
-        self.title("Python环境配置哈哈5.0") 
+        self.title("一键无忧6.0") 
         self.geometry("900x750")
         self.grid_columnconfigure(0, weight=1); self.grid_rowconfigure(1, weight=1)
         top = ctk.CTkFrame(self, fg_color="transparent"); top.grid(row=0, column=0, padx=20, pady=10, sticky="ew")

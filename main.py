@@ -59,14 +59,28 @@ import threading
 import uuid
 import string
 import ctypes
+import re
 from pathlib import Path
 from datetime import datetime
+from typing import Dict, List, Any, Optional
 import customtkinter as ctk
 from tkinter import filedialog, messagebox
-import json
 import base64
 from io import BytesIO
 from PIL import Image, ImageTk
+
+# 版本比较库（关键升级）
+try:
+    from packaging.version import Version
+except ImportError:
+    # 如果 packaging 未安装，使用简单的字符串比较兜底
+    class Version:
+        def __init__(self, v): self.v = tuple(map(int, v.split('.')[:3]))
+        def __lt__(self, o): return self.v < o.v
+        def __gt__(self, o): return self.v > o.v
+        def __eq__(self, o): return self.v == o.v
+        def __str__(self): return '.'.join(map(str, self.v))
+
 
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("blue")
@@ -177,7 +191,37 @@ class PythonEnvManager:
         ],
     }
 
-    
+    # ========== 工程铁律 3: 模块名→包名映射表 ==========
+    # 解决 import 名与 pip 包名不一致的问题
+    MODULE_TO_PACKAGE = {
+        'cv2': 'opencv-python',
+        'PIL': 'Pillow',
+        'sklearn': 'scikit-learn',
+        'yaml': 'PyYAML',
+        'bs4': 'beautifulsoup4',
+        'xgb': 'xgboost',
+        'lgb': 'lightgbm',
+        'tf': 'tensorflow',
+        'wx': 'wxPython',
+        'skimage': 'scikit-image',
+        'dateutil': 'python-dateutil',
+        'dotenv': 'python-dotenv',
+        'serial': 'pyserial',
+        'usb': 'pyusb',
+        'git': 'GitPython',
+        'googleapiclient': 'google-api-python-client',
+        'jose': 'python-jose',
+        'jwt': 'PyJWT',
+        'magic': 'python-magic',
+        'multipart': 'python-multipart',
+        'pymongo': 'pymongo',
+        'redis': 'redis',
+        'bson': 'pymongo',  # bson 通常来自 pymongo
+        'google': 'google-cloud-core',  # 简化处理
+        'ruamel': 'ruamel.yaml',
+        'faiss': 'faiss-cpu',
+    }
+
     def __init__(self):
         self.project_path = None  # 初始为空，必须由用户选择
         self.mirrors = {
@@ -895,11 +939,8 @@ class PythonEnvManager:
             }
             
             found_pkgs = set()
-            pkg_map = {
-                'sklearn': 'scikit-learn', 'cv2': 'opencv-python', 'PIL': 'Pillow',
-                'yaml': 'PyYAML', 'bs4': 'beautifulsoup4', 'xgb': 'xgboost',
-                'lgb': 'lightgbm', 'tf': 'tensorflow', 'wx': 'wxPython'
-            }
+            # 使用类级别的映射表
+            pkg_map = self.MODULE_TO_PACKAGE
             
             ignore_modules = {
                 'mpl_toolkits', 'sklearn.utils', 'PIL.Image', 'matplotlib.pyplot',
@@ -964,27 +1005,71 @@ class PythonEnvManager:
             # 过滤掉以下划线开头的包 (通常是内部模块) 以及空字符串
             packages = [p for p in packages if p and not p.startswith('_')]
             
-            # ========== 工程铁律: 版本固定与 API 检测 ==========
+            # ========== 核心升级: 带证据链的版本决策 ==========
             version_decisions = {}  # {包名: (版本约束, 原因)}
-            deprecated_warnings = []  # 废弃 API 警告列表
+            deprecated_evidences = {}  # {包名: [证据列表]} - 关键升级点
             
+            # 逐文件扫描废弃API，收集证据（文件、行号、代码片段）
+            for file_path in files_to_scan:
+                if self.stop_flag: return False, "任务已停止", []
+                try:
+                    content = ""
+                    if file_path.suffix == '.ipynb':
+                        with open(file_path, 'r', encoding='utf-8') as f:
+                            data = json.load(f)
+                        for cell in data.get('cells', []):
+                            if cell.get('cell_type') == 'code':
+                                source = cell.get('source', [])
+                                if isinstance(source, str): content += source + '\n'
+                                elif isinstance(source, list): content += ''.join(source) + '\n'
+                    else:
+                        content = file_path.read_text(encoding='utf-8', errors='ignore')
+                    
+                    # 扫描所有废弃API规则
+                    for pkg, rules in self.DEPRECATED_API_PATTERNS.items():
+                        for rule in rules:
+                            for match in re.finditer(rule['pattern'], content):
+                                # 计算行号
+                                line_num = content.count('\n', 0, match.start()) + 1
+                                # 提取代码片段（最多80字符）
+                                snippet = content[match.start():match.start()+80].replace('\n', ' ').strip()
+                                
+                                # 收集证据
+                                if pkg not in deprecated_evidences:
+                                    deprecated_evidences[pkg] = []
+                                deprecated_evidences[pkg].append({
+                                    'file': str(file_path.relative_to(self.project_path)),
+                                    'line': line_num,
+                                    'snippet': snippet,
+                                    'pattern': rule.get('pattern', '')[:50],
+                                    'reason': rule['reason'],
+                                    'max_version': rule['max_version'],
+                                    'linked_deps': rule.get('linked_deps', {})
+                                })
+                                break  # 每个规则只记录第一次匹配
+                except Exception:
+                    continue
+            
+            # 基于证据生成版本决策
+            deprecated_warnings = []
             for pkg in packages:
                 pkg_lower = pkg.lower()
                 
-                # 铁律 2: 检测废弃 API - 使用 <= 给 uv 解析空间
-                if pkg_lower in self.DEPRECATED_API_PATTERNS or pkg in self.DEPRECATED_API_PATTERNS:
-                    patterns = self.DEPRECATED_API_PATTERNS.get(pkg_lower) or self.DEPRECATED_API_PATTERNS.get(pkg, [])
-                    for rule in patterns:
-                        if re.search(rule['pattern'], all_code_content):
-                            max_ver = rule['max_version']
-                            reason = rule['reason']
-                            # 使用 <= 而不是 ==，让 uv 在兼容范围内自动选择最优版本
-                            version_decisions[pkg] = (f"<={max_ver}", f"🔍 {reason}")
-                            deprecated_warnings.append((pkg, max_ver, reason))
-                            # 不再手动处理联动依赖，让 uv 自动解决
-                            break
+                # 检查是否有废弃API证据
+                evidence_pkg = pkg_lower if pkg_lower in deprecated_evidences else (pkg if pkg in deprecated_evidences else None)
+                if evidence_pkg:
+                    evidences = deprecated_evidences[evidence_pkg]
+                    if evidences:
+                        # 取第一条证据的版本约束
+                        first_evidence = evidences[0]
+                        max_ver = first_evidence['max_version']
+                        reason = first_evidence['reason']
+                        location = f"{first_evidence['file']}:{first_evidence['line']}"
+                        
+                        version_decisions[pkg] = (f"<={max_ver}", f"🔍 {reason} ({location})")
+                        deprecated_warnings.append((pkg, max_ver, reason, location, first_evidence['snippet']))
                 
-                # 铁律 1: ML 框架版本固定（如果没有被 API 检测覆盖）
+                # ML 框架版本固定（如果没有被 API 检测覆盖）
                 if pkg not in version_decisions:
                     if pkg in self.ML_FRAMEWORK_PINNED_VERSIONS:
                         version_decisions[pkg] = (
@@ -997,12 +1082,14 @@ class PythonEnvManager:
                             "📌 ML 框架安全版本"
                         )
             
-            # ========== 铁律 3: 生成解释性日志报告 ==========
+            # ========== 生成解释性日志报告 ==========
             if deprecated_warnings:
                 self._log("=" * 50, "warning")
                 self._log("⚠️ 检测到历史/废弃 API，已自动降级版本:", "warning")
-                for pkg, ver, reason in deprecated_warnings:
-                    self._log(f"  • {pkg} → {ver}: {reason}", "warning")
+                for pkg, ver, reason, loc, snippet in deprecated_warnings:
+                    self._log(f"  • {pkg} ≤ {ver}", "warning")
+                    self._log(f"    📍 {loc}: {snippet[:50]}...", "warning")
+                    self._log(f"    💡 {reason}", "warning")
                 self._log("=" * 50, "warning")
             
             ml_pinned_count = sum(1 for p in packages if p in version_decisions and "安全版本" in version_decisions[p][1])
@@ -1018,11 +1105,22 @@ class PythonEnvManager:
                         f.write(f"{pkg}{version_spec}  # {reason}\n")
                     else:
                         f.write(f"{pkg}\n")
+            
+            # ========== 核心升级: 生成 report.md 和 report.json ==========
+            self._generate_analysis_report(
+                files_scanned=files_to_scan,
+                packages=packages,
+                version_decisions=version_decisions,
+                deprecated_evidences=deprecated_evidences,
+                scan_mode=scan_mode,
+                target_file=target_file
+            )
                 
             if packages:
                 self._log(f"分析完成，发现 {len(packages)} 个依赖包", "success")
                 if version_decisions:
                     self._log(f"  其中 {len(version_decisions)} 个已固定版本 (工程铁律)", "success")
+                self._log(f"📄 已生成分析报告: report.md", "info")
                 return True, f"分析完成，发现 {len(packages)} 个依赖", packages
             else:
                 self._log("分析完成：未发现第三方依赖包 (仅使用标准库)", "success")
@@ -1030,6 +1128,179 @@ class PythonEnvManager:
                 
         except Exception as e: 
             return False, f"分析失败: {str(e)}", []
+
+    def _generate_analysis_report(self, files_scanned, packages, version_decisions, 
+                                  deprecated_evidences, scan_mode, target_file):
+        """
+        生成可解释的分析报告 (report.md + report.json)
+        这是工程系统的核心特征：所有决策都有证据链
+        """
+        from datetime import datetime
+        
+        report_data = {
+            'generated_at': datetime.now().isoformat(),
+            'project_path': str(self.project_path),
+            'scan_mode': scan_mode,
+            'target_file': str(target_file) if target_file else None,
+            'summary': {
+                'files_scanned': len(files_scanned),
+                'packages_detected': len(packages),
+                'version_constraints': len(version_decisions),
+                'deprecated_apis_found': len(deprecated_evidences)
+            },
+            'packages': packages,
+            'version_decisions': {k: {'constraint': v[0], 'reason': v[1]} for k, v in version_decisions.items()},
+            'deprecated_evidences': deprecated_evidences,
+            'python_recommendation': self._get_python_recommendation(packages)
+        }
+        
+        # 生成 report.json（机器可读）
+        json_path = Path(self.project_path) / 'report.json'
+        try:
+            with open(json_path, 'w', encoding='utf-8') as f:
+                json.dump(report_data, f, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
+        
+        # 生成 report.md（人可读）
+        md_path = Path(self.project_path) / 'report.md'
+        try:
+            md_content = self._build_report_markdown(report_data, files_scanned)
+            with open(md_path, 'w', encoding='utf-8') as f:
+                f.write(md_content)
+        except Exception:
+            pass
+
+    def _get_python_recommendation(self, packages):
+        """基于包依赖推荐Python版本（升级为区间约束）"""
+        py_min = Version('3.9')
+        py_max = Version('3.12')
+        constraints = []
+        
+        # 检测特定包的版本约束
+        pkg_set = set(p.lower() for p in packages)
+        
+        if 'tensorflow' in pkg_set:
+            # TensorFlow 通常滞后于最新 Python
+            py_max = min(py_max, Version('3.11'), key=lambda v: v)
+            constraints.append({'package': 'tensorflow', 'constraint': '<=3.11', 'reason': 'TensorFlow 对新 Python 版本支持滞后'})
+        
+        if 'torch' in pkg_set or 'pytorch' in pkg_set:
+            constraints.append({'package': 'torch', 'constraint': '>=3.9', 'reason': 'PyTorch 需要 Python 3.9+'})
+        
+        if 'numpy' in pkg_set:
+            # NumPy 2.0 需要较新的 Python
+            py_min = max(py_min, Version('3.9'), key=lambda v: v)
+        
+        # 推荐区间中最稳定的版本
+        recommendation = '3.10'  # 默认推荐（兼容性最佳）
+        if py_min > Version('3.10'):
+            recommendation = str(py_min)
+        
+        return {
+            'py_min': str(py_min),
+            'py_max': str(py_max),
+            'recommendation': recommendation,
+            'constraints': constraints
+        }
+
+    def _build_report_markdown(self, data, files_scanned):
+        """构建 Markdown 格式的分析报告"""
+        lines = []
+        
+        # 1. Summary
+        lines.append("# 依赖分析报告")
+        lines.append("")
+        lines.append(f"> 生成时间: {data['generated_at']}")
+        lines.append(f"> 项目路径: `{data['project_path']}`")
+        lines.append("")
+        lines.append("## 1. 摘要 (Summary)")
+        lines.append("")
+        lines.append("| 项目 | 数值 |")
+        lines.append("|------|------|")
+        lines.append(f"| 扫描文件数 | {data['summary']['files_scanned']} |")
+        lines.append(f"| 检测到的包 | {data['summary']['packages_detected']} |")
+        lines.append(f"| 版本约束数 | {data['summary']['version_constraints']} |")
+        lines.append(f"| 废弃 API | {data['summary']['deprecated_apis_found']} |")
+        lines.append("")
+        
+        # 2. Python Version Decision
+        py_rec = data.get('python_recommendation', {})
+        lines.append("## 2. Python 版本决策")
+        lines.append("")
+        lines.append(f"**推荐版本**: `{py_rec.get('recommendation', '3.10')}`")
+        lines.append(f"**兼容区间**: `{py_rec.get('py_min', '3.9')}` - `{py_rec.get('py_max', '3.12')}`")
+        lines.append("")
+        
+        if py_rec.get('constraints'):
+            lines.append("### 约束来源")
+            lines.append("")
+            for c in py_rec['constraints']:
+                lines.append(f"- **{c['package']}**: {c['constraint']} ({c['reason']})")
+            lines.append("")
+        
+        # 3. Dependency Detection
+        lines.append("## 3. 依赖检测结果")
+        lines.append("")
+        lines.append("### 3.1 直接导入的包")
+        lines.append("")
+        lines.append("```")
+        lines.append(", ".join(data['packages'][:20]))
+        if len(data['packages']) > 20:
+            lines.append(f"... 及其他 {len(data['packages']) - 20} 个")
+        lines.append("```")
+        lines.append("")
+        
+        # 3.2 Policy Overrides
+        if data['version_decisions']:
+            lines.append("### 3.2 策略覆盖 (Policy Overrides)")
+            lines.append("")
+            lines.append("| Package | Constraint | Trigger | Location | Reason |")
+            lines.append("|---------|------------|---------|----------|--------|")
+            
+            for pkg, info in data['version_decisions'].items():
+                constraint = info['constraint']
+                reason = info['reason']
+                
+                # 从 deprecated_evidences 获取位置信息
+                location = "policy"
+                trigger = "-"
+                if pkg.lower() in data['deprecated_evidences']:
+                    evs = data['deprecated_evidences'][pkg.lower()]
+                    if evs:
+                        location = f"`{evs[0]['file']}:{evs[0]['line']}`"
+                        trigger = evs[0]['snippet'][:30] + "..."
+                elif pkg in data['deprecated_evidences']:
+                    evs = data['deprecated_evidences'][pkg]
+                    if evs:
+                        location = f"`{evs[0]['file']}:{evs[0]['line']}`"
+                        trigger = evs[0]['snippet'][:30] + "..."
+                
+                # 清理 reason 中的 emoji
+                clean_reason = reason.replace('🔍 ', '').replace('📌 ', '')
+                lines.append(f"| {pkg} | `{constraint}` | {trigger} | {location} | {clean_reason} |")
+            lines.append("")
+        
+        # 5. Reproducibility Notes
+        lines.append("## 4. 可复现说明")
+        lines.append("")
+        lines.append("⚠️ **跨电脑复制限制**：")
+        lines.append("")
+        lines.append("- 仅支持 Windows x64")
+        lines.append("- 建议保持相同目录结构")
+        lines.append("- 换盘符后虚拟环境可能失效")
+        lines.append("- **最佳实践**: 在新电脑上重新运行工具配置环境")
+        lines.append("")
+        
+        # 6. Appendix
+        lines.append("## 5. 附录")
+        lines.append("")
+        lines.append("完整证据链请参见 `report.json`（机器可读格式）")
+        lines.append("")
+        lines.append("---")
+        lines.append("*此报告由 Python Portable Venv Generator 自动生成*")
+        
+        return "\n".join(lines)
 
     def analyze_package_compatibility(self, packages):
         """分析依赖包的 Python 版本兼容性"""

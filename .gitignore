@@ -1,0 +1,49 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+*.egg
+
+# Virtual environments
+.venv/
+venv/
+env/
+env_tools/
+
+# PyInstaller
+*.spec
+!build.spec
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Large binary files (download separately)
+uv.exe
+python_embed.zip
+get-pip.py
+
+# Logs and databases
+*.log
+*.sqlite3
+
+# Settings (user-specific)
+settings.json
+
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints/
+
+# Test files
+test_*.py
+!test_engineering_rules.py

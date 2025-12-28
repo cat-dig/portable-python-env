@@ -1,12 +1,12 @@
-# 🐍 Python 环境自动配置工具
+# Python Portable Venv Generator
 
-> **一键配置 Python 虚拟环境，告别依赖地狱！**
+> 基于源代码分析的一键式 Python 虚拟环境生成工具
 
 ![Python](https://img.shields.io/badge/Python-3.9+-blue.svg)
 ![Platform](https://img.shields.io/badge/Platform-Windows_x64_Only-red.svg)
 ![License](https://img.shields.io/badge/License-MIT-green.svg)
 
-## ⚠️ 重要：系统兼容性说明
+## ⚠️ 关于虚拟环境复制使用的限制说明（请务必阅读）
 
 ### 仅支持 Windows x64
 
@@ -16,7 +16,7 @@
 - ❌ Windows 32位 (x86)
 - ❌ Windows ARM
 
-### 跨电脑复制使用的前提条件
+### 跨电脑复制的限制条件
 
 如果你想将配置好的项目文件夹复制到另一台电脑直接使用，需要满足以下条件：
 
@@ -35,10 +35,10 @@
 
 - 🚀 **一键配置** - 自动分析项目依赖，创建虚拟环境，安装所有包
 - 🔍 **智能依赖解析** - 基于 [uv](https://github.com/astral-sh/uv) 的超高速依赖解析引擎
-- 🎯 **废弃API检测** - 自动识别代码中的历史API，智能降级包版本
-- 📦 **多Python版本** - 支持下载/切换 Python 3.9-3.13
+- 🎯 **基于规则的废弃 API 检测** - 识别代码中的历史 API 并添加版本约束建议
+- 📦 **多 Python 版本** - 支持下载/切换 Python 3.9-3.13
 - 🧹 **环境管理** - 批量扫描、清理虚拟环境
-- 📓 **Jupyter支持** - 自动处理 `.ipynb` 文件依赖
+- 📓 **Jupyter 支持** - 自动处理 `.ipynb` 文件依赖
 
 ## 📸 预览
 
@@ -48,7 +48,7 @@
 
 ### 方式一：直接运行（推荐）
 
-1. 下载 [最新Release](../../releases) 中的 `Python环境配置哈哈.exe`
+1. 下载 [最新 Release](../../releases) 中的可执行文件
 2. 双击运行
 3. 选择项目文件夹 → 点击"开始一键配置"
 
@@ -56,8 +56,8 @@
 
 ```bash
 # 克隆仓库
-git clone https://github.com/YOUR_USERNAME/python-env-manager.git
-cd python-env-manager
+git clone https://github.com/YOUR_USERNAME/python-portable-venv-generator.git
+cd python-portable-venv-generator
 
 # 安装依赖
 pip install customtkinter requests pillow
@@ -72,30 +72,32 @@ python main.py
 
 | 工具 | 说明 | 获取方式 |
 |------|------|----------|
-| `uv.exe` | 超快Python包管理器 | [下载](https://github.com/astral-sh/uv/releases) |
-| `python_embed.zip` | 嵌入式Python（可选） | [Python官网](https://www.python.org/downloads/) |
+| `uv.exe` | 超快 Python 包管理器 | [下载](https://github.com/astral-sh/uv/releases) |
+| `python_embed.zip` | 嵌入式 Python（可选） | [Python 官网](https://www.python.org/downloads/) |
 
 ## 🔧 功能详解
 
 ### 智能依赖分析
 程序会扫描项目中的 `.py` 和 `.ipynb` 文件，自动提取 `import` 语句，生成 `requirements.txt`。
 
-### 废弃API自动降级
-如果检测到代码使用了旧版本API（如 `tf.contrib`、`FixedNoiseGP` 等），会自动添加版本约束：
+### 基于规则的废弃 API 检测
+如果检测到代码使用了旧版本 API（如 `tf.contrib`、`FixedNoiseGP` 等），会根据预定义规则添加版本约束：
 
 ```python
 # 检测到: from botorch.models.gp_regression import FixedNoiseGP
 # 自动添加: botorch<=0.8.5
 ```
 
-### PyTorch/CUDA支持
-安装时会询问是否需要GPU版本，自动配置正确的安装源。
+> 注：此功能基于预定义的规则列表，并非通用静态分析器。
+
+### PyTorch/CUDA 支持
+安装时会询问是否需要 GPU 版本，自动配置正确的安装源。
 
 ## 📁 项目结构
 
 ```
 项目文件夹/
-├── your_code.py          # 你的Python代码
+├── your_code.py          # 你的 Python 代码
 ├── .venv/                # 虚拟环境（自动创建）
 ├── requirements.txt      # 依赖列表（自动生成）
 ├── run.bat              # 运行脚本（自动生成）
@@ -107,7 +109,7 @@ python main.py
 
 ## 🛠️ 打包说明
 
-如需自行打包为exe：
+如需自行打包为 exe：
 
 ```bash
 # 创建打包环境
@@ -133,5 +135,5 @@ pyinstaller build.spec --clean
 
 ## 🙏 致谢
 
-- [uv](https://github.com/astral-sh/uv) - 超快的Python包管理器
-- [CustomTkinter](https://github.com/TomSchimansky/CustomTkinter) - 现代化的Tkinter UI库
+- [uv](https://github.com/astral-sh/uv) - 超快的 Python 包管理器
+- [CustomTkinter](https://github.com/TomSchimansky/CustomTkinter) - 现代化的 Tkinter UI 库

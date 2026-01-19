@@ -13,6 +13,7 @@ dist/
 .venv/
 venv/
 env/
+exe_env/
 env_tools/
 
 # PyInstaller
@@ -37,6 +38,10 @@ get-pip.py
 # Logs and databases
 *.log
 *.sqlite3
+report.json
+report.md
+icon.png
+新建文件夹/
 
 # Settings (user-specific)
 settings.json

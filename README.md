@@ -73,7 +73,7 @@ python main.py
 | 工具 | 说明 | 获取方式 |
 |------|------|----------|
 | `uv.exe` | 超快 Python 包管理器 | [下载](https://github.com/astral-sh/uv/releases) |
-| `python_embed.zip` | 嵌入式 Python（可选） | [Python 官网](https://www.python.org/downloads/) |
+| `python` | 完整版无需安装 Python (v7.0+) | [Automatically Downloaded] |
 
 ## 🔧 功能详解
 
@@ -100,30 +100,31 @@ python main.py
 ├── your_code.py          # 你的 Python 代码
 ├── .venv/                # 虚拟环境（自动创建）
 ├── requirements.txt      # 依赖列表（自动生成）
-├── run.bat              # 运行脚本（自动生成）
-├── activate_env.bat     # 激活环境脚本（自动生成）
-└── env_tools/           # 工具目录（自动创建）
+├── run_*.bat             # 运行脚本（自动生成）
+├── activate_env.bat      # 激活环境脚本（自动生成）
+└── env_tools/            # 工具目录（自动创建）
     ├── uv/
     └── python/
 ```
 
-## 🛠️ 打包说明
+## 🛠️ 打包说明 (v7.0)
 
-如需自行打包为 exe：
+本项目已提供自动化打包脚本 `build.bat`。
 
-```bash
-# 创建打包环境
-conda create -n build_env python=3.10 -y
-conda activate build_env
+### 前置要求
+1. 安装 Python 3.9+
+2. 安装依赖: `pip install pyinstaller customtkinter requests pillow` (或使用 `exe_env`)
+3. 运行 `python download_uv.py` 下载必要的 `uv.exe`
+4. 运行 `python create_icon.py` 生成图标
 
-# 安装依赖
-pip install pyinstaller customtkinter requests pillow
+### 一键打包
+直接运行项目根目录下的 `build.bat` 即可：
 
-# 打包
-pyinstaller build.spec --clean
+```cmd
+.\build.bat
 ```
 
-详见 [dabao.md](dabao.md)
+产物将生成在 `dist/portable-python-env-v7.0.0-win-x64.exe`。
 
 ## 🤝 贡献
 

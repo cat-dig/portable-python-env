@@ -1,6 +1,6 @@
 # main.py
 # -*- coding: utf-8 -*-
-# 一键无忧6.0 - Python 环境自动配置工具
+# 一键无忧 7.0 - Python 环境自动配置工具
 
 import sys
 import os
@@ -10,8 +10,12 @@ if getattr(sys, 'frozen', False):
     # 只有在打包后的 exe 中才执行
     base_path = sys._MEIPASS
     # 强制覆盖环境变量，指向解压后的临时目录
-    os.environ['TCL_LIBRARY'] = os.path.join(base_path, 'tcl')
-    os.environ['TK_LIBRARY'] = os.path.join(base_path, 'tk')
+    # 注意：根据 build.bat 的打包路径，实际上是打包到了 tcl/tcl8.6 和 tcl/tk8.6
+    tcl_dir = os.path.join(base_path, 'tcl', 'tcl8.6')
+    tk_dir = os.path.join(base_path, 'tcl', 'tk8.6')
+    
+    os.environ['TCL_LIBRARY'] = tcl_dir
+    os.environ['TK_LIBRARY'] = tk_dir
     # 也可以尝试直接把这个目录加到 PATH (虽然主要靠变量)
     # os.environ['PATH'] = base_path + ';' + os.environ['PATH']
 
@@ -50,6 +54,7 @@ import subprocess
 import json
 import shutil
 import zipfile
+import tarfile
 import requests
 import threading
 import uuid
@@ -113,14 +118,21 @@ PIPREQS_WRAPPER = None
 
 
 class PythonEnvManager:
-    # Python 下载镜像源 (华为云速度快)
+    # Python 下载源 (使用 python-build-standalone 完整版)
+    # 项目地址: https://github.com/indygreg/python-build-standalone
+    # 优势: 包含完整的 tkinter, ssl, sqlite3 等模块
     PYTHON_MIRRORS = {
-        'huawei': {'name': '华为云镜像', 'url': 'https://mirrors.huaweicloud.com/python/{version}/python-{version}-embed-amd64.zip'},
-        'npmmirror': {'name': 'NPM镜像', 'url': 'https://registry.npmmirror.com/-/binary/python/{version}/python-{version}-embed-amd64.zip'},
-        'official': {'name': '官方源', 'url': 'https://www.python.org/ftp/python/{version}/python-{version}-embed-amd64.zip'}
+        'ghproxy': {
+            'name': 'GitHub 加速镜像 (推荐)', 
+            'url': 'https://ghfast.top/https://github.com/indygreg/python-build-standalone/releases/download/20250106/cpython-{version}+20250106-x86_64-pc-windows-msvc-install_only.tar.gz'
+        },
+        'github': {
+            'name': 'GitHub 官方', 
+            'url': 'https://github.com/indygreg/python-build-standalone/releases/download/20250106/cpython-{version}+20250106-x86_64-pc-windows-msvc-install_only.tar.gz'
+        },
     }
-    # 常用 Python 版本列表
-    PYTHON_VERSIONS = ['3.13.1', '3.12.8', '3.11.11', '3.10.16', '3.9.21']
+    # 常用 Python 版本列表 (需与 python-build-standalone release 对应)
+    PYTHON_VERSIONS = ['3.12.8', '3.11.11', '3.10.16', '3.9.21']
     
     # ========== 工程铁律 1: 智能依赖解析 ==========
     # 不手动固定版本，让 uv 自动解决依赖关系
@@ -226,7 +238,7 @@ class PythonEnvManager:
             'official': {'name': '官方源', 'url': 'https://pypi.org/simple'}
         }
         self.current_mirror = 'tsinghua'
-        self.python_mirror = 'huawei'  # 默认使用华为云下载Python
+        self.python_mirror = 'ghproxy'  # 默认使用 GitHub 加速镜像下载 Python
         self.log_callback = None
         self.progress_callback = None
         self.use_system_python = False
@@ -332,12 +344,6 @@ class PythonEnvManager:
             self.current_proc = None
             return -1, "", str(e)
 
-    def stop_current_task(self):
-        self.stop_flag = True
-        if self.current_proc:
-            try: self.current_proc.kill()
-            except: pass
-        self._log("正在停止任务...", "warning")
 
     def stop_current_task(self):
         self.stop_flag = True
@@ -600,23 +606,23 @@ class PythonEnvManager:
                 return False
         PYTHON_DIR.mkdir(parents=True, exist_ok=True)
         
-        # 构建下载 URL
-        mirror_info = self.PYTHON_MIRRORS.get(self.python_mirror, self.PYTHON_MIRRORS['huawei'])
+        # 构建下载 URL (python-build-standalone 使用 tar.gz 格式)
+        mirror_info = self.PYTHON_MIRRORS.get(self.python_mirror, list(self.PYTHON_MIRRORS.values())[0])
         url = mirror_info['url'].format(version=version)
-        zip_path = TOOLS_DIR / f'python-{version}-embed-amd64.zip'
+        archive_path = TOOLS_DIR / f'cpython-{version}-standalone.tar.gz'
         
-        self._log(f"正在从 {mirror_info['name']} 下载 Python {version}...", "info")
-        self._log(f"下载地址: {url}", "info")
+        self._log(f"正在从 {mirror_info['name']} 下载 Python {version} (完整版)...", "info")
+        self._log(f"下载地址: {url[:80]}...", "info")
         
         try:
-            response = requests.get(url, stream=True, timeout=30)
+            response = requests.get(url, stream=True, timeout=60)
             response.raise_for_status()
             
             total_size = int(response.headers.get('content-length', 0))
             downloaded = 0
             chunk_size = 8192
             
-            with open(zip_path, 'wb') as f:
+            with open(archive_path, 'wb') as f:
                 for chunk in response.iter_content(chunk_size=chunk_size):
                     if self.stop_flag:
                         self._log("下载已取消", "warning")
@@ -632,15 +638,32 @@ class PythonEnvManager:
                                 mb_total = total_size / (1024 * 1024)
                                 self._log(f"下载进度: {mb_down:.1f}/{mb_total:.1f} MB ({progress*100:.0f}%)", "info")
             
-            self._log("下载完成，正在解压...", "info")
-            with zipfile.ZipFile(zip_path, 'r') as z:
-                z.extractall(PYTHON_DIR)
+            self._log("下载完成，正在解压 (可能需要一分钟)...", "info")
             
-            # 修复 pth 文件
-            self._fix_pth_file()
+            # 使用 tarfile 解压 .tar.gz 文件
+            with tarfile.open(archive_path, 'r:gz') as tar:
+                tar.extractall(PYTHON_DIR)
             
-            # 删除下载的 zip 文件
-            try: zip_path.unlink()
+            # python-build-standalone 解压后结构: PYTHON_DIR/python/python.exe
+            # 需要将内容移动到 PYTHON_DIR 根目录
+            extracted_python_dir = PYTHON_DIR / 'python'
+            if extracted_python_dir.exists():
+                self._log("正在整理文件结构...", "info")
+                # 将 python/ 目录下的所有内容移动到 PYTHON_DIR
+                for item in extracted_python_dir.iterdir():
+                    target = PYTHON_DIR / item.name
+                    if target.exists():
+                        if target.is_dir():
+                            shutil.rmtree(target)
+                        else:
+                            target.unlink()
+                    shutil.move(str(item), str(PYTHON_DIR))
+                # 删除空的 python 目录
+                try: extracted_python_dir.rmdir()
+                except: pass
+            
+            # 删除下载的压缩包
+            try: archive_path.unlink()
             except: pass
             
             # 保存版本信息
@@ -649,16 +672,17 @@ class PythonEnvManager:
             self.python_exe_path = PYTHON_DIR / 'python.exe'
             self.save_settings()
             
-            self._log(f"Python {version} 安装成功！", "success")
+            self._log(f"✅ Python {version} (完整版) 安装成功！", "success")
+            self._log("已包含: tkinter, ssl, sqlite3 等完整模块", "success")
             return True
             
         except requests.exceptions.RequestException as e:
             self._log(f"下载失败: {e}", "error")
-            # 尝试备用镜像
-            if self.python_mirror != 'npmmirror':
-                self._log("正在尝试备用镜像 (NPM镜像)...", "warning")
+            # 尝试备用镜像 (GitHub 官方源)
+            if self.python_mirror != 'github':
+                self._log("正在尝试备用镜像 (GitHub 官方)...", "warning")
                 old_mirror = self.python_mirror
-                self.python_mirror = 'npmmirror'
+                self.python_mirror = 'github'
                 result = self.download_python(version)
                 self.python_mirror = old_mirror
                 return result
@@ -1660,8 +1684,8 @@ class PythonEnvManager:
             # 清理工具目录
             if SETTINGS_FILE.exists(): 
                 try: SETTINGS_FILE.unlink()
-                except: pass
-            if TOOLS_DIR.exists():
+                except Exception: pass
+            if TOOLS_DIR and TOOLS_DIR.exists():
                 self._log("正在清理工具缓存...", "info")
                 try:
                     shutil.rmtree(TOOLS_DIR, ignore_errors=True)
@@ -1718,7 +1742,6 @@ class PythonManagerWindow(ctk.CTkToplevel):
         
         # 版本说明映射
         version_labels = {
-            '3.13.1': '最新版',
             '3.12.8': '稳定推荐',
             '3.11.11': '兼容性好',
             '3.10.16': '老项目',
@@ -1742,9 +1765,8 @@ class PythonManagerWindow(ctk.CTkToplevel):
         
         self.mirror_var = tk.StringVar(value=self.manager.python_mirror)
         mirror_info = {
-            'huawei': ('华为云镜像', '国内最快'),
-            'npmmirror': ('NPM镜像', '淘宝源'),
-            'official': ('官方源', '可能较慢')
+            'ghproxy': ('GitHub 加速', '国内推荐'),
+            'github': ('GitHub 官方', '需超时')
         }
         
         col = 0
@@ -2017,10 +2039,42 @@ class EnvManagerWindow(ctk.CTkToplevel):
         except Exception: pass
         self.after(0, lambda: self._scan_finished(venvs))
 
+    def _scan_finished(self, venvs):
+        self.scanning = False; self.progress.stop()
+        self.stop_scan_btn.configure(state="disabled", fg_color="gray")
+        self.pause_scan_btn.configure(state="disabled", text="暂停")
+        self.checkboxes.clear()
+        
+        # 即使停止了，也显示已找到的结果
+        if self.manager.stop_flag: 
+            self.progress_lbl.configure(text=f"扫描已停止，显示部分结果 ({len(venvs)} 个)")
+        elif not venvs: 
+            self.progress_lbl.configure(text="未发现虚拟环境")
+            return
+        else:
+            self.progress_lbl.configure(text=f"扫描完成，共发现 {len(venvs)} 个环境")
+            
+        for v in venvs:
+            name = v['name']; path = v['path']
+            row = ctk.CTkFrame(self.scroll, fg_color="transparent"); row.pack(fill="x", pady=2, padx=5)
+            var = tk.BooleanVar(); cb = ctk.CTkCheckBox(row, text=name, variable=var, width=100); cb.pack(side="left", anchor="w")
+            ctk.CTkLabel(row, text=path, text_color="gray", font=("Arial", 11)).pack(side="left", padx=10)
+            self.checkboxes.append({'path': path, 'var': var})
+
+    def select_all(self): 
+        for item in self.checkboxes: item['var'].set(True)
+    def deselect_all(self): 
+        for item in self.checkboxes: item['var'].set(False)
+    def delete_selected(self):
+        to_delete = [item['path'] for item in self.checkboxes if item['var'].get()]
+        if not to_delete: messagebox.showinfo("提示", "请先选择要删除的环境", parent=self); return
+        if not messagebox.askyesno("严重警告", f"确定要永久删除这 {len(to_delete)} 个环境吗？\n\n这些文件夹及其内容将被彻底清空！\n操作不可恢复！", parent=self): return
+        self.destroy(); self.parent.start_batch_delete(to_delete)
+
 class HelpWindow(ctk.CTkToplevel):
     def __init__(self, parent):
         super().__init__(parent)
-        self.title("一键无忧6.0 - 使用手册")
+        self.title("一键无忧 7.0 - 使用手册")
         self.geometry("700x750")
         
         # 窗口置顶和模态设置
@@ -2034,17 +2088,17 @@ class HelpWindow(ctk.CTkToplevel):
         scroll.pack(fill="both", expand=True, padx=10, pady=10)
         
         # 标题
-        ctk.CTkLabel(scroll, text=" Python环境配置哈哈 4.0 使用手册 ", font=("bold", 24), 
+        ctk.CTkLabel(scroll, text="一键无忧 7.0 使用手册", font=("bold", 24), 
                      text_color="#4fc3f7").pack(pady=20)
         
         # 内容区域
         docs = [
-            (" 👋 欢迎使用 Python环境配置哈哈 4.0", 
+            (" 👋 欢迎使用 一键无忧 7.0", 
              '专为 Python 初学者打造的"一键式"环境配置神器。\n'
              "再也不用担心装包报错、版本冲突或者搞不清 pip 和 conda 了！\n"
              "本工具帮你自动完成：下载Python → 创建虚拟环境 → 分析依赖 → 安装库。"),
 
-            (" 🆕 4.0 版本新功能", 
+            (" 🆕 7.0 版本功能", 
              "【PyTorch 智能版本选择】\n"
              "当检测到项目需要 PyTorch 时，自动弹出版本选择：\n"
              "  • GPU 版本：需要 NVIDIA 显卡 + CUDA\n"
@@ -2128,43 +2182,10 @@ class HelpWindow(ctk.CTkToplevel):
             content.pack(anchor="w", padx=20, pady=5)
             
         # 底部
-        ctk.CTkLabel(scroll, text="--- 祝你编程愉快 哈哈 ---", text_color="gray").pack(pady=30)
+        ctk.CTkLabel(scroll, text="--- 祝你编程愉快 ---", text_color="gray").pack(pady=30)
         
         # 关闭按钮
         ctk.CTkButton(self, text="我知道了", command=self.destroy).pack(pady=10)
-
-
-    def _scan_finished(self, venvs):
-        self.scanning = False; self.progress.stop()
-        self.stop_scan_btn.configure(state="disabled", fg_color="gray")
-        self.pause_scan_btn.configure(state="disabled", text="暂停")
-        self.checkboxes.clear()
-        
-        # 即使停止了，也显示已找到的结果
-        if self.manager.stop_flag: 
-            self.progress_lbl.configure(text=f"扫描已停止，显示部分结果 ({len(venvs)} 个)")
-        elif not venvs: 
-            self.progress_lbl.configure(text="未发现虚拟环境")
-            return
-        else:
-            self.progress_lbl.configure(text=f"扫描完成，共发现 {len(venvs)} 个环境")
-            
-        for v in venvs:
-            name = v['name']; path = v['path']
-            row = ctk.CTkFrame(self.scroll, fg_color="transparent"); row.pack(fill="x", pady=2, padx=5)
-            var = tk.BooleanVar(); cb = ctk.CTkCheckBox(row, text=name, variable=var, width=100); cb.pack(side="left", anchor="w")
-            ctk.CTkLabel(row, text=path, text_color="gray", font=("Arial", 11)).pack(side="left", padx=10)
-            self.checkboxes.append({'path': path, 'var': var})
-
-    def select_all(self): 
-        for item in self.checkboxes: item['var'].set(True)
-    def deselect_all(self): 
-        for item in self.checkboxes: item['var'].set(False)
-    def delete_selected(self):
-        to_delete = [item['path'] for item in self.checkboxes if item['var'].get()]
-        if not to_delete: messagebox.showinfo("提示", "请先选择要删除的环境", parent=self); return
-        if not messagebox.askyesno("严重警告", f"确定要永久删除这 {len(to_delete)} 个环境吗？\n\n这些文件夹及其内容将被彻底清空！\n操作不可恢复！", parent=self): return
-        self.destroy(); self.parent.start_batch_delete(to_delete)
 
 class App(ctk.CTk):
     def __init__(self):
@@ -2280,7 +2301,7 @@ class App(ctk.CTk):
             _splash = None
 
     def setup_ui(self):
-        self.title("一键无忧6.0") 
+        self.title("一键无忧 7.0") 
         self.geometry("900x750")
         self.grid_columnconfigure(0, weight=1); self.grid_rowconfigure(1, weight=1)
         top = ctk.CTkFrame(self, fg_color="transparent"); top.grid(row=0, column=0, padx=20, pady=10, sticky="ew")

@@ -122,8 +122,12 @@ class PythonEnvManager:
     # 项目地址: https://github.com/indygreg/python-build-standalone
     # 优势: 包含完整的 tkinter, ssl, sqlite3 等模块
     PYTHON_MIRRORS = {
-        'ghproxy': {
-            'name': 'GitHub 加速镜像 (推荐)', 
+        'npmmirror': {
+            'name': '国内镜像 (CN)', 
+            'url': 'https://registry.npmmirror.com/-/binary/python-build-standalone/20250106/cpython-{version}+20250106-x86_64-pc-windows-msvc-install_only.tar.gz'
+        },
+        'ghfast': {
+            'name': 'GitHub 加速', 
             'url': 'https://ghfast.top/https://github.com/indygreg/python-build-standalone/releases/download/20250106/cpython-{version}+20250106-x86_64-pc-windows-msvc-install_only.tar.gz'
         },
         'github': {
@@ -148,12 +152,9 @@ class PythonEnvManager:
             {
                 'pattern': r'from\s+botorch\.models\.gp_regression\s+import\s+FixedNoiseGP',
                 'max_version': '0.8.5',
-                'reason': 'FixedNoiseGP 已在 BoTorch≥0.9 中移除',
-                # 联动依赖：botorch 0.8.5 需要特定版本的 gpytorch 和 torch
-                'linked_deps': {
-                    'gpytorch': '==1.10',
-                    'torch': '>=1.11,<2.0',  # botorch 0.8.5 不支持 torch 2.x
-                }
+                'reason': 'FixedNoiseGP 已在 BoTorch≥0.9 中移除'
+                # 注意：不再限制 torch 版本，因为 torch 1.x 不支持 Python 3.12
+                # 用户如需使用旧版 botorch，建议降级到 Python 3.10
             },
             {
                 'pattern': r'from\s+botorch\.acquisition\.analytic\s+import\s+ExpectedImprovement',
@@ -238,7 +239,7 @@ class PythonEnvManager:
             'official': {'name': '官方源', 'url': 'https://pypi.org/simple'}
         }
         self.current_mirror = 'tsinghua'
-        self.python_mirror = 'ghproxy'  # 默认使用 GitHub 加速镜像下载 Python
+        self.python_mirror = 'npmmirror'  # 默认镜像源使用 GitHub 加速镜像下载 Python
         self.log_callback = None
         self.progress_callback = None
         self.use_system_python = False
@@ -266,7 +267,7 @@ class PythonEnvManager:
                     self.use_system_python = data.get('use_system_python', False)
                     self.system_python_path = data.get('system_python_path', None)
                     self.downloaded_python_version = data.get('downloaded_python_version', None)
-                    self.python_mirror = data.get('python_mirror', 'huawei')
+                    self.python_mirror = data.get('python_mirror', 'npmmirror')
                     self.theme = data.get('theme', 'Light')
                     if self.use_system_python and self.system_python_path:
                         self.python_exe_path = Path(self.system_python_path)
@@ -275,7 +276,7 @@ class PythonEnvManager:
             self.use_system_python = False
             self.system_python_path = None
             self.downloaded_python_version = None
-            self.python_mirror = 'huawei'
+            self.python_mirror = 'npmmirror'
             self.theme = 'Light'
             # 只有在工具目录确定后才能设置默认路径
             if PYTHON_DIR:
@@ -642,7 +643,10 @@ class PythonEnvManager:
             
             # 使用 tarfile 解压 .tar.gz 文件
             with tarfile.open(archive_path, 'r:gz') as tar:
-                tar.extractall(PYTHON_DIR)
+                if sys.version_info >= (3, 12):
+                    tar.extractall(PYTHON_DIR, filter='data')
+                else:
+                    tar.extractall(PYTHON_DIR)
             
             # python-build-standalone 解压后结构: PYTHON_DIR/python/python.exe
             # 需要将内容移动到 PYTHON_DIR 根目录
@@ -686,9 +690,15 @@ class PythonEnvManager:
                 result = self.download_python(version)
                 self.python_mirror = old_mirror
                 return result
+            # 如果 GitHub 官方源也失败了，或者一开始就是 GitHub 源，则尝试 npmmirror
+            self._log("所有镜像尝试失败，将默认使用 npmmirror 作为 Python 镜像源。", "warning")
+            self.python_mirror = 'npmmirror'
             return False
         except Exception as e:
             self._log(f"安装失败: {e}", "error")
+            # 确保在任何安装失败的情况下，如果当前镜像无效，则重置为默认
+            if self.python_mirror not in self.PYTHON_MIRRORS:
+                self.python_mirror = 'npmmirror'
             return False
 
     def get_available_python_versions(self):
@@ -920,10 +930,34 @@ class PythonEnvManager:
                 self._log(f"  📄 {f.name}", "info")
             if len(files_to_scan) > 3: self._log(f"  ...以及其他 {len(files_to_scan)-3} 个文件", "info")
 
-            # --- 正则分析 ---
+            # --- 预扫描：收集所有本地模块名 ---
             import re
             import sys # Ensure sys is imported for builtin_modules
             builtin_modules = sys.builtin_module_names
+            
+            # 构建本地模块集合（包括所有子目录中的 .py 文件）
+            local_modules = set()
+            try:
+                for py_file in Path(self.project_path).rglob('*.py'):
+                    # 跳过虚拟环境和隐藏目录
+                    if any(x in py_file.parts for x in ['.venv', 'venv', 'env', 'env_tools', '__pycache__', '.git', '.idea']):
+                        continue
+                    # 提取模块名（不含扩展名）
+                    module_name = py_file.stem
+                    local_modules.add(module_name)
+                
+                # 同时收集包名（包含 __init__.py 的目录）
+                for init_file in Path(self.project_path).rglob('__init__.py'):
+                    if any(x in init_file.parts for x in ['.venv', 'venv', 'env', 'env_tools', '__pycache__', '.git', '.idea']):
+                        continue
+                    # 提取包名（父目录名）
+                    package_name = init_file.parent.name
+                    local_modules.add(package_name)
+            except Exception:
+                pass  # 如果扫描失败，继续执行（可能会误判，但不会中断）
+            
+            if local_modules:
+                self._log(f"识别到 {len(local_modules)} 个本地模块，将从依赖中排除", "info")
             # 扩展标准库列表
             std_libs = {
                 'os', 'sys', 're', 'json', 'time', 'datetime', 'math', 'random', 'shutil', 
@@ -995,21 +1029,23 @@ class PythonEnvManager:
                     # 1. import xxx
                     matches = re.findall(r'^\s*import\s+([a-zA-Z0-9_]+)', content, re.MULTILINE)
                     for m in matches:
-                        if m not in std_libs and m not in builtin_modules and m not in ignore_modules:
+                        # 使用预构建的本地模块集合进行过滤
+                        if m not in local_modules and m not in std_libs and m not in builtin_modules and m not in ignore_modules:
                             found_pkgs.add(pkg_map.get(m, m))
                     
                     # 2. from xxx
                     matches = re.findall(r'^\s*from\s+([a-zA-Z0-9_]+)', content, re.MULTILINE)
                     for m in matches:
-                        if m not in std_libs and m not in builtin_modules and m not in ignore_modules:
+                        if m not in local_modules and m not in std_libs and m not in builtin_modules and m not in ignore_modules:
                             found_pkgs.add(pkg_map.get(m, m))
                     
                     # --- 智能推断隐式依赖 ---
                     if 'pandas' in found_pkgs or 'pd' in found_pkgs: # pd 可能是别名，但 map 里 pandas -> pandas
                          # 检查是否有 Excel 写入操作
                          if 'to_excel' in content or 'ExcelWriter' in content:
-                             found_pkgs.add('openpyxl')
-                             self._log(f"智能推断: 检测到 Excel 操作，添加 openpyxl", "info")
+                             if 'openpyxl' not in found_pkgs:
+                                 found_pkgs.add('openpyxl')
+                                 self._log(f"智能推断: 检测到 Excel 操作，添加 openpyxl", "info")
                     if 'matplotlib' in found_pkgs or 'plt' in found_pkgs:
                          # matplotlib 通常需要 pillow 处理图像保存
                          found_pkgs.add('Pillow')
@@ -1091,6 +1127,16 @@ class PythonEnvManager:
                         
                         version_decisions[pkg] = (f"<={max_ver}", f"🔍 {reason} ({location})")
                         deprecated_warnings.append((pkg, max_ver, reason, location, first_evidence['snippet']))
+                        
+                        # Apply linked dependencies (e.g., botorch 0.8.5 needs torch < 2.0)
+                        linked = first_evidence.get('linked_deps', {})
+                        for linked_pkg, linked_ver in linked.items():
+                            # Only apply if not already decided or strictly overrides
+                            if linked_pkg not in version_decisions:
+                                version_decisions[linked_pkg] = (linked_ver, f"🔗 联动依赖 ({pkg}需要)")
+                                # Ensure it's in the package list so it gets written to requirements.txt
+                                if linked_pkg not in packages:
+                                    packages.append(linked_pkg)
                 
                 # ML 框架版本固定（如果没有被 API 检测覆盖）
                 if pkg not in version_decisions:
@@ -1468,7 +1514,22 @@ class PythonEnvManager:
             ]
             ret, out, err = self._run_cmd(cmd_torch)
             if ret != 0:
-                self._log(f"PyTorch 安装失败: {err[:100]}", "warning")
+                self._log(f"PyTorch (清华源) 安装失败: {err[:100]}", "warning")
+                # 尝试自动切换到官方源重试
+                if "tsinghua" in pytorch_source:
+                    self._log("正在尝试切换到 PyTorch 官方源重试...", "warning")
+                    # 简单推断 URL: cpu -> cpu, cu124 -> cu124
+                    fallback_url = "https://download.pytorch.org/whl/cpu"
+                    if "cu" in pytorch_source and "cpu" not in pytorch_source:
+                        # 提取 cuda 版本或默认为 cu124
+                        fallback_url = "https://download.pytorch.org/whl/cu124"
+                    
+                    cmd_torch[-1] = fallback_url
+                    ret, out, err = self._run_cmd(cmd_torch)
+                    if ret == 0:
+                        self._log("PyTorch (官方源) 安装成功 ✓", "success")
+                    else:
+                        self._log(f"PyTorch (官方源) 安装也失败: {err[:100]}", "error")
             else:
                 self._log("PyTorch 安装成功 ✓", "success")
         
@@ -1673,7 +1734,7 @@ class PythonEnvManager:
                 try: f.unlink()
                 except: pass
             
-            for f in ['requirements.txt', 'activate_env.bat']: 
+            for f in ['requirements.txt', 'activate_env.bat', 'report.json', 'report.md']: 
                 p = Path(self.project_path)/f
                 if p.exists(): 
                     try: p.unlink()
@@ -1765,8 +1826,9 @@ class PythonManagerWindow(ctk.CTkToplevel):
         
         self.mirror_var = tk.StringVar(value=self.manager.python_mirror)
         mirror_info = {
-            'ghproxy': ('GitHub 加速', '国内推荐'),
-            'github': ('GitHub 官方', '需超时')
+            'npmmirror': ('国内镜像', '推荐'),
+            'ghfast': ('GitHub 加速', '备用'),
+            'github': ('GitHub 官方', '慢')
         }
         
         col = 0
@@ -1811,7 +1873,7 @@ class PythonManagerWindow(ctk.CTkToplevel):
         # 说明
         info_frame = ctk.CTkFrame(self, fg_color="transparent")
         info_frame.pack(pady=10, padx=20, fill="x")
-        info_text = "说明:\n• 华为云镜像速度最快 (推荐)\n• 下载的是 Windows x64 嵌入式版本\n• 下载后会自动配置 pip"
+        info_text = "说明:\n• 国内镜像由 npmmirror 提供，速度最快 (推荐)\n• 下载的是 python-build-standalone 完整版\n• 包含 tkinter, ssl, sqlite3 等完整模块"
         ctk.CTkLabel(info_frame, text=info_text, justify="left", 
                      text_color="gray", font=("Arial", 11)).pack(anchor="w")
     
@@ -2555,11 +2617,11 @@ class App(ctk.CTk):
                         "PyTorch 版本选择",
                         "检测到项目需要 PyTorch！\n\n"
                         "请选择安装版本：\n\n"
-                        "【是】→ GPU 版本 (需要 NVIDIA 显卡 + CUDA)\n"
-                        "【否】→ CPU 版本 (推荐，更稳定)\n"
+                        "【是】→ CPU 版本 (推荐，稳定兼容) ✅\n"
+                        "【否】→ GPU 版本 (需要 NVIDIA 显卡 + CUDA)\n"
                         "【取消】→ 使用默认版本 (不推荐)\n\n"
-                        "💡 提示：如果没有 NVIDIA 显卡，请选择 CPU 版本！\n"
-                        "GPU 版本约 2.5GB，CPU 版本约 150MB。"
+                        "💡 提示：大部分情况推荐 CPU 版本！\n"
+                        "CPU 版本约 150MB，GPU 版本约 2.5GB。"
                     )
                     pytorch_choice[0] = result
                 self.after(0, ask_pytorch)
@@ -2573,12 +2635,12 @@ class App(ctk.CTk):
                     # 超时检测（防止死循环）
                     time.sleep(0.05)
                 
-                if pytorch_choice[0] == True:  # 是 = GPU
-                    pytorch_source = "https://mirrors.tuna.tsinghua.edu.cn/pytorch-wheels/cu124"
-                    self.safe_log("用户选择: GPU 版本 (CUDA 12.4) - 清华镜像加速", "info")
-                elif pytorch_choice[0] == False:  # 否 = CPU
+                if pytorch_choice[0] == True:  # 是 = CPU (推荐)
                     pytorch_source = "https://mirrors.tuna.tsinghua.edu.cn/pytorch-wheels/cpu"
                     self.safe_log("用户选择: CPU 版本 (推荐) - 清华镜像加速", "info")
+                elif pytorch_choice[0] == False:  # 否 = GPU (高级)
+                    pytorch_source = "https://mirrors.tuna.tsinghua.edu.cn/pytorch-wheels/cu124"
+                    self.safe_log("用户选择: GPU 版本 (CUDA 12.4) - 清华镜像加速", "info")
                 else:  # 取消 = 默认
                     self.safe_log("用户选择: 使用 PyPI 默认版本", "info")
             

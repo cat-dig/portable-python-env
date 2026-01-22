@@ -27,7 +27,7 @@ if not exist "icon.ico" (
 
 echo 所有文件就绪
 echo.
-echo [3/4] 开始打包 (文件名: portable-python-env-v7.0.0-win-x64)...
+echo [3/4] 开始打包 (文件名: portable-python-env-v7.0.2-win-x64)...
 echo.
 
 REM 设置 TCL/TK 环境变量
@@ -35,7 +35,7 @@ REM 注意: 即使在 main.py 中已处理，这里保持为空或注释，以�
 REM set TCL_LIBRARY=...
 
 .\exe_env\Scripts\pyinstaller ^
-    --name="portable-python-env-v7.0.0-win-x64" ^
+    --name="portable-python-env-v7.0.2-win-x64" ^
     --onefile ^
     --windowed ^
     --icon=icon.ico ^
@@ -57,8 +57,8 @@ if errorlevel 1 (
 echo.
 echo [4/4] 打包完成！
 echo.
-echo 生成文件: dist\portable-python-env-v7.0.0-win-x64.exe
-dir "dist\portable-python-env-v7.0.0-win-x64.exe" | findstr "portable"
+echo 生成文件: dist\portable-python-env-v7.0.2-win-x64.exe
+dir "dist\portable-python-env-v7.0.2-win-x64.exe" | findstr "portable"
 
 echo.
 echo ========================================

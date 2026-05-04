@@ -27,23 +27,23 @@ if not exist "icon.ico" (
 
 echo 所有文件就绪
 echo.
-echo [3/4] 开始打包 (文件名: portable-python-env-v7.0.2-win-x64)...
+echo [3/4] 开始打包 (文件名: portable-python-env-v7.0.3-win-x64)...
 echo.
 
-REM 设置 TCL/TK 环境变量
-REM 注意: 即使在 main.py 中已处理，这里保持为空或注释，以免干扰 pyinstaller 分析
-REM set TCL_LIBRARY=...
+REM 自动检测系统 Python 的 Tcl/Tk 并打包进 exe（确保 tkinter 在 exe 中可用）
+for /f "delims=" %%a in ('.\exe_env\Scripts\python -c "import sys,os; print(os.path.join(os.path.dirname(sys._base_executable),'tcl'))"') do set "TCL_ROOT=%%a"
+echo Tcl 根目录: %TCL_ROOT%
 
 .\exe_env\Scripts\pyinstaller ^
-    --name="portable-python-env-v7.0.2-win-x64" ^
+    --name="portable-python-env-v7.0.3-win-x64" ^
     --onefile ^
     --windowed ^
     --icon=icon.ico ^
     --add-data="uv.exe;." ^
-    --add-data=".\env_tools\python\tcl\tcl8.6;tcl\tcl8.6" ^
-    --add-data=".\env_tools\python\tcl\tk8.6;tcl\tk8.6" ^
-    --add-data=".\env_tools\python\DLLs\tcl86t.dll;." ^
-    --add-data=".\env_tools\python\DLLs\tk86t.dll;." ^
+    --add-data="%TCL_ROOT%\tcl8.6;tcl\tcl8.6" ^
+    --add-data="%TCL_ROOT%\tk8.6;tcl\tk8.6" ^
+    --add-data="%TCL_ROOT%\..\DLLs\tcl86t.dll;." ^
+    --add-data="%TCL_ROOT%\..\DLLs\tk86t.dll;." ^
     --hidden-import=PIL._tkinter_finder ^
     main.py
 
@@ -57,8 +57,8 @@ if errorlevel 1 (
 echo.
 echo [4/4] 打包完成！
 echo.
-echo 生成文件: dist\portable-python-env-v7.0.2-win-x64.exe
-dir "dist\portable-python-env-v7.0.2-win-x64.exe" | findstr "portable"
+echo 生成文件: dist\portable-python-env-v7.0.3-win-x64.exe
+dir "dist\portable-python-env-v7.0.3-win-x64.exe" | findstr "portable"
 
 echo.
 echo ========================================

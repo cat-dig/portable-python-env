@@ -5,19 +5,17 @@
 import sys
 import os
 
-# --- ⚡ 运行时修复：强制指定 Tcl/Tk 路径 (解决 PyInstaller 冲突) ---
+# --- ⚡ 运行时修复：Tcl/Tk 路径 (解决 PyInstaller 冲突) ---
+# 如果 Tcl/Tk 已经通过 --add-data 打包进 exe，则优先使用打包的版本
+# 否则由 PyInstaller 的 pyi_rth__tkinter.py 运行时钩子自动处理
 if getattr(sys, 'frozen', False):
-    # 只有在打包后的 exe 中才执行
     base_path = sys._MEIPASS
-    # 强制覆盖环境变量，指向解压后的临时目录
-    # 注意：根据 build.bat 的打包路径，实际上是打包到了 tcl/tcl8.6 和 tcl/tk8.6
     tcl_dir = os.path.join(base_path, 'tcl', 'tcl8.6')
     tk_dir = os.path.join(base_path, 'tcl', 'tk8.6')
-    
-    os.environ['TCL_LIBRARY'] = tcl_dir
-    os.environ['TK_LIBRARY'] = tk_dir
-    # 也可以尝试直接把这个目录加到 PATH (虽然主要靠变量)
-    # os.environ['PATH'] = base_path + ';' + os.environ['PATH']
+    if os.path.isdir(tcl_dir):
+        os.environ['TCL_LIBRARY'] = tcl_dir
+    if os.path.isdir(tk_dir):
+        os.environ['TK_LIBRARY'] = tk_dir
 
 # ============ 启动画面 (在导入其他模块前显示) ============
 import tkinter as tk
@@ -123,43 +121,44 @@ class PythonEnvManager:
     # 优势: 包含完整的 tkinter, ssl, sqlite3 等模块
     PYTHON_MIRRORS = {
         'npmmirror': {
-            'name': '国内镜像 (CN)', 
-            'url': 'https://registry.npmmirror.com/-/binary/python-build-standalone/20250106/cpython-{version}+20250106-x86_64-pc-windows-msvc-install_only.tar.gz'
+            'name': '国内镜像 (CN)',
+            'url': 'https://registry.npmmirror.com/-/binary/python-build-standalone/{release}/cpython-{version}+{release}-x86_64-pc-windows-msvc-install_only.tar.gz'
         },
         'ghfast': {
-            'name': 'GitHub 加速', 
-            'url': 'https://ghfast.top/https://github.com/indygreg/python-build-standalone/releases/download/20250106/cpython-{version}+20250106-x86_64-pc-windows-msvc-install_only.tar.gz'
+            'name': 'GitHub 加速',
+            'url': 'https://ghfast.top/https://github.com/indygreg/python-build-standalone/releases/download/{release}/cpython-{version}+{release}-x86_64-pc-windows-msvc-install_only.tar.gz'
         },
         'github': {
-            'name': 'GitHub 官方', 
-            'url': 'https://github.com/indygreg/python-build-standalone/releases/download/20250106/cpython-{version}+20250106-x86_64-pc-windows-msvc-install_only.tar.gz'
+            'name': 'GitHub 官方',
+            'url': 'https://github.com/indygreg/python-build-standalone/releases/download/{release}/cpython-{version}+{release}-x86_64-pc-windows-msvc-install_only.tar.gz'
         },
     }
     # 常用 Python 版本列表 (需与 python-build-standalone release 对应)
+    # python-build-standalone 的 release 版本 (代码中使用 {release} 占位符)
+    PYTHON_STANDALONE_VERSION = '20250106'
     PYTHON_VERSIONS = ['3.12.8', '3.11.11', '3.10.16', '3.9.21']
-    
+
     # ========== 工程铁律 1: 智能依赖解析 ==========
     # 不手动固定版本，让 uv 自动解决依赖关系
     # 只有检测到废弃 API 时才添加版本约束
-    ML_FRAMEWORK_PINNED_VERSIONS = {
-        # 留空 - 让 uv 自动解析最新兼容版本
-    }
-    
+    ML_FRAMEWORK_PINNED_VERSIONS = {}
+
     # ========== 工程铁律 2: 废弃 API 检测规则 ==========
     # 检测代码中使用的历史 API，自动降级到兼容版本
+    # linked_deps: 该包降级后连带需要降级的依赖（如 botorch≤0.8.5 需要 torch<2.0）
     DEPRECATED_API_PATTERNS = {
         'botorch': [
             {
                 'pattern': r'from\s+botorch\.models\.gp_regression\s+import\s+FixedNoiseGP',
                 'max_version': '0.8.5',
-                'reason': 'FixedNoiseGP 已在 BoTorch≥0.9 中移除'
-                # 注意：不再限制 torch 版本，因为 torch 1.x 不支持 Python 3.12
-                # 用户如需使用旧版 botorch，建议降级到 Python 3.10
+                'reason': 'FixedNoiseGP 已在 BoTorch≥0.9 中移除',
+                'linked_deps': {'torch': '<2.0'},
             },
             {
                 'pattern': r'from\s+botorch\.acquisition\.analytic\s+import\s+ExpectedImprovement',
                 'max_version': '0.9.5',
-                'reason': 'ExpectedImprovement 路径在新版本中变更'
+                'reason': 'ExpectedImprovement 路径在新版本中变更',
+                'linked_deps': {'torch': '<2.0'},
             },
         ],
         'tensorflow': [
@@ -255,8 +254,11 @@ class PythonEnvManager:
         self.python_exe_path = None
         
         self.current_proc = None
+        self._proc_lock = threading.Lock()  # 保护 current_proc 的线程安全
         self.stop_flag = False
-        self.pause_flag = False # 新增暂停标志
+        self.pause_flag = False
+        self.pause_event = threading.Event()
+        self.pause_event.set()  # 初始为"未暂停"状态
         self.load_settings()
 
     def load_settings(self):
@@ -309,56 +311,75 @@ class PythonEnvManager:
 
     def _run_cmd(self, cmd, env=None, cwd=None):
         if self.stop_flag: return -1, "", "任务已取消"
+        proc = None
         try:
             # 确保实时输出的环境变量
             if env is None: env = os.environ.copy()
             env["PYTHONUNBUFFERED"] = "1"
-            
-            self.current_proc = subprocess.Popen(
+
+            proc = subprocess.Popen(
                 cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, # 合并输出以简化处理
                 text=True, encoding='utf-8', errors='ignore',
                 env=env, cwd=cwd, creationflags=NO_WINDOW,
                 bufsize=1 # 行缓冲
             )
-            
+            with self._proc_lock:
+                self.current_proc = proc
+
             full_output = []
-            
+
             # 实时读取
             while True:
-                line = self.current_proc.stdout.readline()
-                if not line and self.current_proc.poll() is not None:
+                line = proc.stdout.readline()
+                if not line and proc.poll() is not None:
                     break
                 if line:
                     line_str = line.rstrip()
                     if line_str:
                         self._log(line_str) # 实时打印日志!
                         full_output.append(line)
-            
-            returncode = self.current_proc.poll()
-            self.current_proc = None
-            
+
+            returncode = proc.poll()
+            with self._proc_lock:
+                self.current_proc = None
+
             output_str = "".join(full_output)
-            
+
             if self.stop_flag: return -1, output_str, "任务已强制停止"
             return returncode, output_str, "" # stderr 已合并
         except Exception as e:
-            self.current_proc = None
+            with self._proc_lock:
+                self.current_proc = None
+            if proc:
+                try: proc.kill()
+                except: pass
             return -1, "", str(e)
 
 
     def stop_current_task(self):
         self.stop_flag = True
-        self.pause_flag = False # 停止时自动取消暂停
-        if self.current_proc:
-            try: self.current_proc.kill()
+        self.pause_flag = False
+        self.pause_event.set()  # 解除暂停阻塞
+        with self._proc_lock:
+            proc = self.current_proc
+            self.current_proc = None
+        if proc:
+            try: proc.kill()
             except: pass
         self._log("正在停止任务...", "warning")
 
-    def pause_task(self): self.pause_flag = True
-    def resume_task(self): self.pause_flag = False
-    def reset_stop_flag(self): 
+    def pause_task(self):
+        self.pause_flag = True
+        self.pause_event.clear()
+
+    def resume_task(self):
+        self.pause_flag = False
+        self.pause_event.set()
+
+    def reset_stop_flag(self):
         self.stop_flag = False
         self.pause_flag = False
+        self.pause_event.set()
 
     def check_system_python_availability(self):
         if SETTINGS_FILE.exists(): return None 
@@ -424,14 +445,16 @@ class PythonEnvManager:
                         for line in f:
                             if line.startswith('version = '):
                                 info['version'] = line.split('=')[1].strip()
-                except: pass
+                except Exception as e:
+                    self._log(f"读取 pyvenv.cfg 失败: {e}", "warning")
             if info['version'] == '未知':
                 try:
                     py_exe = venv_path / 'Scripts' / 'python.exe'
                     if py_exe.exists():
                         res = subprocess.run([str(py_exe), '--version'], capture_output=True, text=True, creationflags=NO_WINDOW)
                         if res.returncode == 0: info['version'] = res.stdout.strip()
-                except: pass
+                except Exception as e:
+                    self._log(f"获取 Python 版本失败: {e}", "warning")
         return info
 
     def scan_simple_venvs(self, root_path=None):
@@ -447,14 +470,7 @@ class PythonEnvManager:
             if self._is_venv(target_path):
                 venvs.append({'name': f"{target_path.name} (当前目录)", 'path': str(target_path)})
 
-            # 2. 显式检查可能得命名惯例 (比如 folder_env)
-            potential_name = f"{target_path.name}_env"
-            potential_path = target_path / potential_name
-            if potential_path.exists() and self._is_venv(potential_path):
-                 # 如果迭代器没扫到（比如权限问题），这里强制添加
-                 pass # 下面的迭代通常会涵盖，但这里可以作为一个保底测试
-
-            # 3. 检查所有子目录
+            # 2. 检查所有子目录
             ignore_list = {'.git', '.idea', '.vscode', '__pycache__', 'node_modules'}
             
             count = 0
@@ -488,8 +504,9 @@ class PythonEnvManager:
             if (p / 'bin' / 'python').exists(): return True
             # 4. Conda 判定
             if (p / 'conda-meta').exists(): return True
-            # 5. 宽松判定：存在 Lib/site-packages 且看起来像个环境
-            if (p / 'Lib' / 'site-packages').exists(): return True
+            # 5. 宽松判定：存在 Lib/site-packages 且同时有 Scripts 目录（避免将普通项目误判为 venv）
+            if (p / 'Lib' / 'site-packages').exists() and (p / 'Scripts').exists():
+                return True
             return False
         except: return False
 
@@ -505,10 +522,10 @@ class PythonEnvManager:
                 for root, dirs, files in os.walk(search_path, topdown=True):
                     if self.stop_flag: return venvs
                     
-                    # 暂停逻辑
-                    while self.pause_flag:
+                    # 暂停逻辑（使用 Event 避免忙等）
+                    if self.pause_flag:
+                        self.pause_event.wait()  # 阻塞直到 resume_task() 调用 set()
                         if self.stop_flag: return venvs
-                        import time; time.sleep(0.5)
 
                     # 性能优化：排除大文件夹
                     dirs[:] = [d for d in dirs if d.lower() not in ignore_dirs]
@@ -588,7 +605,8 @@ class PythonEnvManager:
                 if f.name.endswith('._pth'):
                     c = f.read_text(encoding='utf-8').replace('#import site', 'import site')
                     f.write_text(c, encoding='utf-8')
-        except: pass
+        except Exception as e:
+            self._log(f"修复 ._pth 文件失败: {e}", "warning")
 
     def download_python(self, version):
         """从镜像源下载指定版本的 Python"""
@@ -607,99 +625,95 @@ class PythonEnvManager:
                 return False
         PYTHON_DIR.mkdir(parents=True, exist_ok=True)
         
-        # 构建下载 URL (python-build-standalone 使用 tar.gz 格式)
-        mirror_info = self.PYTHON_MIRRORS.get(self.python_mirror, list(self.PYTHON_MIRRORS.values())[0])
-        url = mirror_info['url'].format(version=version)
         archive_path = TOOLS_DIR / f'cpython-{version}-standalone.tar.gz'
-        
-        self._log(f"正在从 {mirror_info['name']} 下载 Python {version} (完整版)...", "info")
-        self._log(f"下载地址: {url[:80]}...", "info")
-        
-        try:
-            response = requests.get(url, stream=True, timeout=60)
-            response.raise_for_status()
-            
-            total_size = int(response.headers.get('content-length', 0))
-            downloaded = 0
-            chunk_size = 8192
-            
-            with open(archive_path, 'wb') as f:
-                for chunk in response.iter_content(chunk_size=chunk_size):
-                    if self.stop_flag:
-                        self._log("下载已取消", "warning")
-                        return False
-                    if chunk:
-                        f.write(chunk)
-                        downloaded += len(chunk)
-                        if total_size > 0:
-                            progress = downloaded / total_size
-                            self._progress(progress)
-                            if downloaded % (chunk_size * 100) == 0:
-                                mb_down = downloaded / (1024 * 1024)
-                                mb_total = total_size / (1024 * 1024)
-                                self._log(f"下载进度: {mb_down:.1f}/{mb_total:.1f} MB ({progress*100:.0f}%)", "info")
-            
-            self._log("下载完成，正在解压 (可能需要一分钟)...", "info")
-            
-            # 使用 tarfile 解压 .tar.gz 文件
-            with tarfile.open(archive_path, 'r:gz') as tar:
-                if sys.version_info >= (3, 12):
-                    tar.extractall(PYTHON_DIR, filter='data')
-                else:
-                    tar.extractall(PYTHON_DIR)
-            
-            # python-build-standalone 解压后结构: PYTHON_DIR/python/python.exe
-            # 需要将内容移动到 PYTHON_DIR 根目录
-            extracted_python_dir = PYTHON_DIR / 'python'
-            if extracted_python_dir.exists():
-                self._log("正在整理文件结构...", "info")
-                # 将 python/ 目录下的所有内容移动到 PYTHON_DIR
-                for item in extracted_python_dir.iterdir():
-                    target = PYTHON_DIR / item.name
-                    if target.exists():
-                        if target.is_dir():
-                            shutil.rmtree(target)
-                        else:
-                            target.unlink()
-                    shutil.move(str(item), str(PYTHON_DIR))
-                # 删除空的 python 目录
-                try: extracted_python_dir.rmdir()
+
+        # 按优先级构建镜像尝试列表（迭代而非递归）
+        mirror_attempt_keys = [self.python_mirror]
+        for mk in ['npmmirror', 'ghfast', 'github']:
+            if mk not in mirror_attempt_keys:
+                mirror_attempt_keys.append(mk)
+
+        for attempt_idx, attempt_key in enumerate(mirror_attempt_keys):
+            if self.stop_flag: return False
+
+            mirror_info = self.PYTHON_MIRRORS[attempt_key]
+            url = mirror_info['url'].format(version=version, release=self.PYTHON_STANDALONE_VERSION)
+
+            if attempt_idx > 0:
+                self._log(f"正在尝试备用镜像 ({attempt_idx+1}/{len(mirror_attempt_keys)}): {mirror_info['name']}...", "warning")
+            self._log(f"正在从 {mirror_info['name']} 下载 Python {version} (完整版)...", "info")
+            self._log(f"下载地址: {url[:80]}...", "info")
+
+            try:
+                response = requests.get(url, stream=True, timeout=60)
+                response.raise_for_status()
+
+                total_size = int(response.headers.get('content-length', 0))
+                downloaded = 0
+                chunk_size = 8192
+
+                with open(archive_path, 'wb') as f:
+                    for chunk in response.iter_content(chunk_size=chunk_size):
+                        if self.stop_flag:
+                            self._log("下载已取消", "warning")
+                            return False
+                        if chunk:
+                            f.write(chunk)
+                            downloaded += len(chunk)
+                            if total_size > 0:
+                                progress = downloaded / total_size
+                                self._progress(progress)
+                                if downloaded % (chunk_size * 100) == 0:
+                                    mb_down = downloaded / (1024 * 1024)
+                                    mb_total = total_size / (1024 * 1024)
+                                    self._log(f"下载进度: {mb_down:.1f}/{mb_total:.1f} MB ({progress*100:.0f}%)", "info")
+
+                self._log("下载完成，正在解压 (可能需要一分钟)...", "info")
+
+                with tarfile.open(archive_path, 'r:gz') as tar:
+                    if sys.version_info >= (3, 12):
+                        tar.extractall(PYTHON_DIR, filter='data')
+                    else:
+                        tar.extractall(PYTHON_DIR)
+
+                # python-build-standalone 解压后结构: PYTHON_DIR/python/python.exe
+                extracted_python_dir = PYTHON_DIR / 'python'
+                if extracted_python_dir.exists():
+                    self._log("正在整理文件结构...", "info")
+                    for item in extracted_python_dir.iterdir():
+                        target = PYTHON_DIR / item.name
+                        if target.exists():
+                            if target.is_dir():
+                                shutil.rmtree(target)
+                            else:
+                                target.unlink()
+                        shutil.move(str(item), str(PYTHON_DIR))
+                    try: extracted_python_dir.rmdir()
+                    except: pass
+
+                try: archive_path.unlink()
                 except: pass
-            
-            # 删除下载的压缩包
-            try: archive_path.unlink()
-            except: pass
-            
-            # 保存版本信息
-            self.downloaded_python_version = version
-            self.use_system_python = False
-            self.python_exe_path = PYTHON_DIR / 'python.exe'
-            self.save_settings()
-            
-            self._log(f"✅ Python {version} (完整版) 安装成功！", "success")
-            self._log("已包含: tkinter, ssl, sqlite3 等完整模块", "success")
-            return True
-            
-        except requests.exceptions.RequestException as e:
-            self._log(f"下载失败: {e}", "error")
-            # 尝试备用镜像 (GitHub 官方源)
-            if self.python_mirror != 'github':
-                self._log("正在尝试备用镜像 (GitHub 官方)...", "warning")
-                old_mirror = self.python_mirror
-                self.python_mirror = 'github'
-                result = self.download_python(version)
-                self.python_mirror = old_mirror
-                return result
-            # 如果 GitHub 官方源也失败了，或者一开始就是 GitHub 源，则尝试 npmmirror
-            self._log("所有镜像尝试失败，将默认使用 npmmirror 作为 Python 镜像源。", "warning")
-            self.python_mirror = 'npmmirror'
-            return False
-        except Exception as e:
-            self._log(f"安装失败: {e}", "error")
-            # 确保在任何安装失败的情况下，如果当前镜像无效，则重置为默认
-            if self.python_mirror not in self.PYTHON_MIRRORS:
-                self.python_mirror = 'npmmirror'
-            return False
+
+                self.downloaded_python_version = version
+                self.use_system_python = False
+                self.python_exe_path = PYTHON_DIR / 'python.exe'
+                self.save_settings()
+
+                self._log(f"✅ Python {version} (完整版) 安装成功！", "success")
+                self._log("已包含: tkinter, ssl, sqlite3 等完整模块", "success")
+                return True
+
+            except requests.exceptions.RequestException as e:
+                self._log(f"从 {mirror_info['name']} 下载失败: {e}", "error")
+                continue  # 尝试下一个镜像
+            except Exception as e:
+                self._log(f"从 {mirror_info['name']} 安装失败: {e}", "error")
+                continue  # 尝试下一个镜像
+
+        # 所有镜像都失败
+        self._log("所有镜像源均下载失败，将默认使用 npmmirror 作为 Python 镜像源。", "warning")
+        self.python_mirror = 'npmmirror'
+        return False
 
     def get_available_python_versions(self):
         """返回可供下载的 Python 版本列表"""
@@ -739,7 +753,6 @@ class PythonEnvManager:
                 try:
                     content = pyproject.read_text(encoding='utf-8')
                     # 匹配 requires-python = ">=3.8" 或 python = "^3.9"
-                    import re
                     patterns = [
                         r'requires-python\s*=\s*["\']>=?(\d+\.\d+)',
                         r'python\s*=\s*["\'][\^~>=]*(\d+\.\d+)',
@@ -759,7 +772,6 @@ class PythonEnvManager:
             if setup_py.exists():
                 try:
                     content = setup_py.read_text(encoding='utf-8')
-                    import re
                     match = re.search(r'python_requires\s*=\s*["\']>=?(\d+\.\d+)', content)
                     if match:
                         detected_version = match.group(1)
@@ -772,7 +784,6 @@ class PythonEnvManager:
             if runtime.exists():
                 try:
                     content = runtime.read_text(encoding='utf-8').strip()
-                    import re
                     match = re.search(r'python-(\d+\.\d+\.\d+)', content)
                     if match:
                         detected_version = match.group(1)
@@ -931,7 +942,6 @@ class PythonEnvManager:
             if len(files_to_scan) > 3: self._log(f"  ...以及其他 {len(files_to_scan)-3} 个文件", "info")
 
             # --- 预扫描：收集所有本地模块名 ---
-            import re
             import sys # Ensure sys is imported for builtin_modules
             builtin_modules = sys.builtin_module_names
             
@@ -958,42 +968,30 @@ class PythonEnvManager:
             
             if local_modules:
                 self._log(f"识别到 {len(local_modules)} 个本地模块，将从依赖中排除", "info")
-            # 扩展标准库列表
-            std_libs = {
-                'os', 'sys', 're', 'json', 'time', 'datetime', 'math', 'random', 'shutil', 
-                'subprocess', 'threading', 'pathlib', 'typing', 'collections', 'io', 'copy',
-                'warnings', 'unittest', 'traceback', 'logging', 'platform', 'functools',
-                'argparse', 'ast', 'asyncio', 'base64', 'calendar', 'configparser', 'contextlib',
-                'csv', 'ctypes', 'dataclasses', 'decimal', 'difflib', 'distutils', 'email',
-                'enum', 'errno', 'fnmatch', 'gc', 'getopt', 'getpass', 'glob', 'gzip', 'hashlib',
-                'heapq', 'hmac', 'html', 'http', 'imaplib', 'importlib', 'inspect', 'itertools',
-                'keyword', 'locale', 'mimetypes', 'multiprocessing', 'operator', 'pickle',
-                'pkgutil', 'pprint', 'profile', 'pstats', 'queue', 'quopri', 'selectors',
-                'shelve', 'signal', 'site', 'smtpd', 'smtplib', 'socket', 'socketserver',
-                'sqlite3', 'ssl', 'stat', 'string', 'struct', 'tempfile', 'textwrap',
-                'token', 'tokenize', 'trace', 'tty', 'types', 'urllib', 'uuid', 'venv',
-                'weakref', 'webbrowser', 'wsgiref', 'xml', 'xmlrpc', 'zipfile', 'zlib', 'zoneinfo',
-                # GUI 和其他标准库
-                'tkinter', '_tkinter', 'turtle', 'idlelib', 'turtledemo',
-                'curses', 'readline', 'rlcompleter', 'code', 'codeop',
-                'concurrent', 'futures', 'runpy', 'sched', 'secrets', 'select',
-                'pty', 'pwd', 'grp', 'crypt', 'termios', 'resource', 'syslog',
-                'winreg', 'winsound', 'msvcrt', 'msilib',  # Windows 专用
-                'posix', 'posixpath', 'ntpath', 'genericpath',
-                'abc', 'aifc', 'binascii', 'binhex', 'bisect', 'builtins',
-                'chunk', 'cmath', 'cmd', 'codecs', 'colorsys', 'compileall',
-                'copyreg', 'cProfile', 'dis', 'doctest', 'filecmp', 'fileinput',
-                'formatter', 'fractions', 'ftplib', 'gettext', 'graphlib',
-                'imghdr', 'imp', 'ipaddress', 'lib2to3', 'linecache', 'lzma',
-                'mailbox', 'mailcap', 'marshal', 'mmap', 'modulefinder', 'netrc',
-                'nis', 'nntplib', 'numbers', 'optparse', 'ossaudiodev', 'parser',
-                'pathlib', 'pdb', 'pipes', 'poplib', 'pyclbr', 'py_compile',
-                'pydoc', 'pyexpat', 'reprlib', 'setsox', 'shlex', 'sndhdr',
-                'spwd', 'statistics', 'stringprep', 'sunau', 'symbol', 'symtable',
-                'sys', 'sysconfig', 'tabnanny', 'tarfile', 'telnetlib', 'test',
-                'timeit', 'tomllib', 'tracemalloc', 'unicodedata', 'uu', 'wave',
-                'winreg', 'winsound', 'xdrlib', 'zipapp', 'zipimport'
-            }
+            # 标准库列表（优先使用 sys.stdlib_module_names，Python 3.10+）
+            if hasattr(sys, 'stdlib_module_names'):
+                std_libs = set(sys.stdlib_module_names)
+            else:
+                # Python < 3.10 的兜底集合（仅包含最常用的标准库）
+                std_libs = {
+                    'os', 'sys', 're', 'json', 'time', 'datetime', 'math', 'random',
+                    'shutil', 'subprocess', 'threading', 'pathlib', 'typing', 'collections',
+                    'io', 'copy', 'warnings', 'unittest', 'traceback', 'logging', 'platform',
+                    'functools', 'argparse', 'ast', 'asyncio', 'base64', 'calendar',
+                    'configparser', 'contextlib', 'csv', 'ctypes', 'dataclasses', 'decimal',
+                    'difflib', 'email', 'enum', 'errno', 'fnmatch', 'gc', 'getopt', 'getpass',
+                    'glob', 'gzip', 'hashlib', 'heapq', 'hmac', 'html', 'http', 'imaplib',
+                    'importlib', 'inspect', 'itertools', 'keyword', 'locale', 'mimetypes',
+                    'multiprocessing', 'operator', 'pickle', 'pkgutil', 'pprint', 'queue',
+                    'selectors', 'shelve', 'signal', 'site', 'smtplib', 'socket',
+                    'socketserver', 'sqlite3', 'ssl', 'stat', 'string', 'struct', 'tempfile',
+                    'textwrap', 'token', 'tokenize', 'trace', 'tty', 'types', 'urllib',
+                    'uuid', 'venv', 'weakref', 'webbrowser', 'xml', 'zipfile', 'zlib',
+                    'tkinter', '_tkinter', 'turtle', 'curses', 'concurrent', 'secrets',
+                    'winreg', 'winsound', 'msvcrt',
+                }
+            # 始终补充标准库别名
+            std_libs.update(['PIL', 'sklearn', 'cv2'])
             
             found_pkgs = set()
             # 使用类级别的映射表
@@ -1004,9 +1002,9 @@ class PythonEnvManager:
                 'matplotlib.font_manager', 'mpl_toolkits.mplot3d', 'cv2.cv2'
             }
             
-            # 收集所有代码内容，用于废弃 API 检测
-            all_code_content = ""
-            
+            # 废弃 API 证据集（在文件扫描过程中填充）
+            deprecated_evidences = {}
+
             for file_path in files_to_scan:
                 if self.stop_flag: return False, "任务已停止", []
                 try:
@@ -1022,34 +1020,47 @@ class PythonEnvManager:
                                 elif isinstance(source, list): content += ''.join(source) + '\n'
                     else:
                         content = file_path.read_text(encoding='utf-8', errors='ignore')
-                    
-                    # 收集代码用于 API 检测
-                    all_code_content += content + "\n"
 
                     # 1. import xxx
                     matches = re.findall(r'^\s*import\s+([a-zA-Z0-9_]+)', content, re.MULTILINE)
                     for m in matches:
-                        # 使用预构建的本地模块集合进行过滤
                         if m not in local_modules and m not in std_libs and m not in builtin_modules and m not in ignore_modules:
                             found_pkgs.add(pkg_map.get(m, m))
-                    
+
                     # 2. from xxx
                     matches = re.findall(r'^\s*from\s+([a-zA-Z0-9_]+)', content, re.MULTILINE)
                     for m in matches:
                         if m not in local_modules and m not in std_libs and m not in builtin_modules and m not in ignore_modules:
                             found_pkgs.add(pkg_map.get(m, m))
-                    
+
                     # --- 智能推断隐式依赖 ---
-                    if 'pandas' in found_pkgs or 'pd' in found_pkgs: # pd 可能是别名，但 map 里 pandas -> pandas
-                         # 检查是否有 Excel 写入操作
+                    if 'pandas' in found_pkgs or 'pd' in found_pkgs:
                          if 'to_excel' in content or 'ExcelWriter' in content:
                              if 'openpyxl' not in found_pkgs:
                                  found_pkgs.add('openpyxl')
                                  self._log(f"智能推断: 检测到 Excel 操作，添加 openpyxl", "info")
                     if 'matplotlib' in found_pkgs or 'plt' in found_pkgs:
-                         # matplotlib 通常需要 pillow 处理图像保存
                          found_pkgs.add('Pillow')
-                except Exception: # Catch any error during file reading/parsing
+
+                    # 3. 废弃 API 检测（复用已读取的 content，避免二次读盘）
+                    for pkg, rules in self.DEPRECATED_API_PATTERNS.items():
+                        for rule in rules:
+                            for match in re.finditer(rule['pattern'], content):
+                                line_num = content.count('\n', 0, match.start()) + 1
+                                snippet = content[match.start():match.start()+80].replace('\n', ' ').strip()
+                                if pkg not in deprecated_evidences:
+                                    deprecated_evidences[pkg] = []
+                                deprecated_evidences[pkg].append({
+                                    'file': str(file_path.relative_to(self.project_path)),
+                                    'line': line_num,
+                                    'snippet': snippet,
+                                    'pattern': rule.get('pattern', '')[:50],
+                                    'reason': rule['reason'],
+                                    'max_version': rule['max_version'],
+                                    'linked_deps': rule.get('linked_deps', {})
+                                })
+                                break  # 每个规则只记录第一次匹配
+                except Exception:
                     continue
             
             # --- 智能推断 Jupyter 依赖 ---
@@ -1066,48 +1077,7 @@ class PythonEnvManager:
             
             # ========== 核心升级: 带证据链的版本决策 ==========
             version_decisions = {}  # {包名: (版本约束, 原因)}
-            deprecated_evidences = {}  # {包名: [证据列表]} - 关键升级点
-            
-            # 逐文件扫描废弃API，收集证据（文件、行号、代码片段）
-            for file_path in files_to_scan:
-                if self.stop_flag: return False, "任务已停止", []
-                try:
-                    content = ""
-                    if file_path.suffix == '.ipynb':
-                        with open(file_path, 'r', encoding='utf-8') as f:
-                            data = json.load(f)
-                        for cell in data.get('cells', []):
-                            if cell.get('cell_type') == 'code':
-                                source = cell.get('source', [])
-                                if isinstance(source, str): content += source + '\n'
-                                elif isinstance(source, list): content += ''.join(source) + '\n'
-                    else:
-                        content = file_path.read_text(encoding='utf-8', errors='ignore')
-                    
-                    # 扫描所有废弃API规则
-                    for pkg, rules in self.DEPRECATED_API_PATTERNS.items():
-                        for rule in rules:
-                            for match in re.finditer(rule['pattern'], content):
-                                # 计算行号
-                                line_num = content.count('\n', 0, match.start()) + 1
-                                # 提取代码片段（最多80字符）
-                                snippet = content[match.start():match.start()+80].replace('\n', ' ').strip()
-                                
-                                # 收集证据
-                                if pkg not in deprecated_evidences:
-                                    deprecated_evidences[pkg] = []
-                                deprecated_evidences[pkg].append({
-                                    'file': str(file_path.relative_to(self.project_path)),
-                                    'line': line_num,
-                                    'snippet': snippet,
-                                    'pattern': rule.get('pattern', '')[:50],
-                                    'reason': rule['reason'],
-                                    'max_version': rule['max_version'],
-                                    'linked_deps': rule.get('linked_deps', {})
-                                })
-                                break  # 每个规则只记录第一次匹配
-                except Exception:
-                    continue
+            # deprecated_evidences 已在文件扫描阶段收集完毕
             
             # 基于证据生成版本决策
             deprecated_warnings = []
@@ -1137,6 +1107,14 @@ class PythonEnvManager:
                                 # Ensure it's in the package list so it gets written to requirements.txt
                                 if linked_pkg not in packages:
                                     packages.append(linked_pkg)
+
+                            # 检查版本冲突：如果联动依赖的版本约束与 Python 3.12+ 不兼容
+                            if linked_ver.startswith('<') and '2.0' in linked_ver:
+                                self._log(
+                                    f"⚠️ {pkg}{max_ver} 需要 {linked_pkg}{linked_ver}，"
+                                    f"这与 Python 3.12+ 不兼容（torch≥2.0 才能支持 Python 3.12）",
+                                    "warning"
+                                )
                 
                 # ML 框架版本固定（如果没有被 API 检测覆盖）
                 if pkg not in version_decisions:
@@ -1430,7 +1408,6 @@ class PythonEnvManager:
 
     def _check_python_version_compat(self, requires_python, major, minor):
         """检查指定的 Python 版本是否满足 requires_python 要求"""
-        import re
         version_tuple = (major, minor)
         
         # 去除空格
@@ -1471,22 +1448,54 @@ class PythonEnvManager:
         if self.stop_flag: return False, "已停止"
         success, msg = self.ensure_tools_ready()
         if not success: return False, msg
-        
+
         self._log(f"正在创建虚拟环境 ({venv_name})...", "info")
-        
-        # 核心修复：uv --python 参数
-        # 如果我们已经下载并配置了对应的 python.exe，直接传绝对路径
+
         target_python = str(self.python_exe_path)
-        
-        # 只有当用户强制指定了不同于当前配置的版本时，才传版本号 (这可能会失败，除非系统安装了)
-        # 但通常 ensure_python_available 已经确保了 self.python_exe_path 是正确的
-        
+
         cmd = [str(UV_EXE_PATH), 'venv', venv_name, '--python', target_python]
         env = os.environ.copy(); env["UV_NO_PROGRESS"] = "1"
-        
+
         ret, out, err = self._run_cmd(cmd, env=env)
-        if ret == 0: return True, "创建成功"
-        return False, err
+        if ret != 0: return False, err
+
+        # ========== 修复 pyvenv.cfg 确保 IDE 兼容性 ==========
+        self._log("正在修复虚拟环境配置 (IDE 兼容性)...", "info")
+        try:
+            venv_path = Path(self.project_path) / venv_name
+            cfg_path = venv_path / 'pyvenv.cfg'
+            if cfg_path.exists():
+                cfg_text = cfg_path.read_text(encoding='utf-8')
+
+                # 确保 home 指向正确的 Python 安装目录（父目录）
+                py_home = str(Path(target_python).parent.resolve())
+
+                lines = cfg_text.splitlines(keepends=True)
+                has_home = False
+                has_include = False
+                new_lines = []
+                for line in lines:
+                    stripped = line.strip()
+                    if stripped.startswith('home '):
+                        has_home = True
+                        new_lines.append(f"home = {py_home}\n")
+                    elif stripped.startswith('include-system-site-packages '):
+                        has_include = True
+                        new_lines.append(line)
+                    else:
+                        new_lines.append(line)
+
+                if not has_home:
+                    new_lines.append(f"home = {py_home}\n")
+                if not has_include:
+                    new_lines.append("include-system-site-packages = false\n")
+
+                cfg_path.write_text(''.join(new_lines), encoding='utf-8')
+                self._log("pyvenv.cfg 已优化", "success")
+        except Exception as e:
+            self._log(f"pyvenv.cfg 优化失败 (不影响使用): {e}", "warning")
+
+        return True, "创建成功"
 
     def install_dependencies(self, venv_name='.venv', pytorch_source=None):
         """安装项目依赖
@@ -1501,7 +1510,11 @@ class PythonEnvManager:
         if not venv_python.exists(): return False, "虚拟环境异常"
         
         mirror_url = self.mirrors[self.current_mirror]['url']
-        
+
+        # 统一设置 uv 环境变量：禁用进度条动画（避免 readline 卡在 \r 输出上）
+        uv_env = os.environ.copy()
+        uv_env["UV_NO_PROGRESS"] = "1"
+
         # 如果指定了 PyTorch 源，先单独安装 PyTorch 相关包
         if pytorch_source:
             self._log(f"正在从 PyTorch 官方源安装 PyTorch...", "info")
@@ -1512,49 +1525,62 @@ class PythonEnvManager:
                 '--python', str(venv_python), 
                 '--index-url', pytorch_source
             ]
-            ret, out, err = self._run_cmd(cmd_torch)
+            ret, out, err = self._run_cmd(cmd_torch, env=uv_env)
             if ret != 0:
-                self._log(f"PyTorch (清华源) 安装失败: {err[:100]}", "warning")
+                source_label = '清华' if 'tsinghua' in pytorch_source else '指定'
+                self._log(f"PyTorch ({source_label}源) 安装失败: {err[:100]}", "warning")
                 # 尝试自动切换到官方源重试
-                if "tsinghua" in pytorch_source:
+                if "tsinghua" in pytorch_source or "mirrors" in pytorch_source:
                     self._log("正在尝试切换到 PyTorch 官方源重试...", "warning")
-                    # 简单推断 URL: cpu -> cpu, cu124 -> cu124
-                    fallback_url = "https://download.pytorch.org/whl/cpu"
-                    if "cu" in pytorch_source and "cpu" not in pytorch_source:
-                        # 提取 cuda 版本或默认为 cu124
-                        fallback_url = "https://download.pytorch.org/whl/cu124"
-                    
+                    # 从失败的 URL 中提取 CUDA 版本，保留用户选择
+                    cu_match = re.search(r'(cu\d+|cpu)', pytorch_source)
+                    cuda_variant = cu_match.group(1) if cu_match else "cpu"
+                    fallback_url = f"https://download.pytorch.org/whl/{cuda_variant}"
                     cmd_torch[-1] = fallback_url
-                    ret, out, err = self._run_cmd(cmd_torch)
+
+                    ret, out, err = self._run_cmd(cmd_torch, env=uv_env)
                     if ret == 0:
                         self._log("PyTorch (官方源) 安装成功 ✓", "success")
                     else:
                         self._log(f"PyTorch (官方源) 安装也失败: {err[:100]}", "error")
             else:
                 self._log("PyTorch 安装成功 ✓", "success")
-        
+
         # 安装其他依赖
         self._log(f"正在安装其他依赖 (源: {self.mirrors[self.current_mirror]['name']})...", "info")
         cmd = [str(UV_EXE_PATH), 'pip', 'install', '-r', 'requirements.txt', '--python', str(venv_python), '--index-url', mirror_url]
-        
-        ret, out, err = self._run_cmd(cmd)
+
+        ret, out, err = self._run_cmd(cmd, env=uv_env)
         if ret == 0:
             # ========== 安装成功后：锁定实际版本 ==========
             self._log("正在生成版本锁定文件...", "info")
             try:
                 # 使用 uv pip freeze 获取实际安装的版本
                 cmd_freeze = [str(UV_EXE_PATH), 'pip', 'freeze', '--python', str(venv_python)]
-                ret_freeze, freeze_out, _ = self._run_cmd(cmd_freeze)
+                ret_freeze, freeze_out, _ = self._run_cmd(cmd_freeze, env=uv_env)
                 if ret_freeze == 0 and freeze_out.strip():
                     # 用实际版本覆盖 requirements.txt
                     req_path = Path(self.project_path) / 'requirements.txt'
                     with open(req_path, 'w', encoding='utf-8') as f:
                         f.write("# 由工具自动生成 - 实际安装版本\n")
-                        f.write(f"# 生成时间: {__import__('datetime').datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+                        f.write(f"# 生成时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
                         f.write(freeze_out)
                     self._log("✅ 已锁定实际安装版本到 requirements.txt", "success")
             except Exception as e:
                 self._log(f"版本锁定失败 (不影响使用): {e}", "warning")
+
+            # 生成 uv.lock 文件（确保可复现安装）
+            try:
+                uv_lock_path = Path(self.project_path) / 'uv.lock'
+                if not uv_lock_path.exists():
+                    cmd_lock = [str(UV_EXE_PATH), 'lock', '--python', str(venv_python)]
+                    ret_lock, out_lock, _ = self._run_cmd(cmd_lock, env=uv_env)
+                    if ret_lock == 0:
+                        self._log("✅ 已生成 uv.lock 锁定文件", "success")
+                    else:
+                        self._log("ℹ️ uv.lock 生成跳过（项目无 pyproject.toml），依赖版本已通过 requirements.txt 锁定", "info")
+            except Exception as e:
+                self._log(f"uv.lock 生成跳过: {e}", "info")
             return True, out
         return False, err
 
@@ -1633,7 +1659,6 @@ class PythonEnvManager:
             for bat in Path(self.project_path).glob('run_*.bat'):
                 try:
                     content = bat.read_text(encoding='utf-8', errors='ignore')
-                    import re
                     m = re.search(r'call\s+"?(.+?)[\\\/]Scripts[\\\/]activate\.bat"?', content, re.IGNORECASE)
                     if m:
                         env_name = m.group(1)
@@ -2174,7 +2199,7 @@ class HelpWindow(ctk.CTkToplevel):
             (" 🚀 快速上手：只需 3 步", 
              "【第一步：选择项目】\n"
              '点击"浏览"按钮，选择你的 Python 项目文件夹。\n'
-             "程序会自动推荐一个环境名称（如 项目名_env）。\n\n"
+             "环境名称默认为 .venv（VS Code 等 IDE 自动识别）。\n\n"
              "【第二步：点击开始】\n"
              '点击"开始一键配置"大按钮。软件会自动执行：\n'
              "  ① 扫描项目中的 .py/.ipynb 文件，分析依赖\n"
@@ -2189,8 +2214,8 @@ class HelpWindow(ctk.CTkToplevel):
 
             (" 🐍 Python 版本管理",
              "点击【Python 管理 / 智能推荐】按钮，可以：\n\n"
-             "• 下载指定版本：支持 3.9 ~ 3.13 多个版本\n"
-             "• 选择镜像源：华为云（最快）、NPM镜像、官方源\n"
+             "• 下载指定版本：支持 3.9 ~ 3.12 多个版本\n"
+             "• 选择镜像源：清华源（推荐）、阿里云、官方源\n"
              "• 智能推荐：根据项目依赖自动分析最佳版本\n"
              "• 使用系统Python：如果电脑已安装Python，可直接使用\n\n"
              "💡 小贴士：Python 3.11 兼容性最好，推荐新手使用"),
@@ -2266,92 +2291,7 @@ class App(ctk.CTk):
         self.after(200, self.check_initial_python)
         self.after(500, self.load_data)
     
-    # ==================== IDE 功能已禁用 (v2.0) ====================
-    # def open_ide(self, force_choose=False):
-    #     """智能打开 IDE - 自动快速启动或选择项目
-    #     
-    #     Args:
-    #         force_choose: 如果为True，强制让用户选择项目（按住Shift点击时）
-    #     """
-    #     current_project = None
-    #     
-    #     # 智能模式1: 如果有历史记录且不是强制选择，直接快速启动
-    #     if not force_choose and self.manager.last_ide_project and os.path.exists(self.manager.last_ide_project):
-    #         # 快速启动模式
-    #         current_project = self.manager.last_ide_project
-    #         self.safe_log(f"⚡ 快速启动 IDE: {Path(current_project).name}", "info")
-    #     
-    #     # 智能模式2: 检查主界面是否已选择项目
-    #     if not current_project:
-    #         path_input = self.path_entry.get().strip()
-    #         if path_input and os.path.exists(path_input) and not force_choose:
-    #             current_project = path_input
-    #     
-    #     # 智能模式3: 需要用户选择项目
-    #     if not current_project:
-    #         # 首次使用或强制选择新项目
-    #         choice = messagebox.askyesnocancel(
-    #             "打开 IDE",
-    #             "请选择项目文件夹\n\n"
-    #             "【是】- 浏览选择项目文件夹\n"
-    #             "【否】- 在当前目录打开 IDE\n"
-    #             "【取消】- 返回\n\n"
-    #             "💡 提示: 选择后下次可直接快速启动",
-    #             parent=self
-    #         )
-    #         
-    #         if choice is None:  # 取消
-    #             return
-    #         elif choice:  # 是 - 浏览选择
-    #             project_dir = filedialog.askdirectory(title="选择项目文件夹", parent=self)
-    #             if not project_dir:
-    #                 return
-    #             current_project = project_dir
-    #         else:  # 否 - 当前目录
-    #             current_project = os.getcwd()
-    #     
-    #     # 确保项目路径有效
-    #     if not os.path.isdir(current_project):
-    #         messagebox.showerror("错误", f"无效的项目路径：{current_project}", parent=self)
-    #         return
-    #     
-    #     # 智能检测虚拟环境
-    #     venv_path = None
-    #     
-    #     # 1. 尝试使用输入框中的环境名
-    #     venv_name = self.venv_name_entry.get().strip()
-    #     if venv_name:
-    #         test_venv = Path(current_project) / venv_name
-    #         if self.manager._is_venv(test_venv):
-    #             venv_path = test_venv
-    #     
-    #     # 2. 如果没找到，尝试扫描项目下的环境
-    #     if not venv_path:
-    #         venvs = self.manager.scan_simple_venvs(current_project)
-    #         if venvs:
-    #             venv_path = Path(venvs[0]['path'])
-    #     
-    #     # 3. 如果还是没有，尝试使用上次的 IDE 环境（如果项目相同）
-    #     if not venv_path and self.manager.last_ide_venv and current_project == self.manager.last_ide_project:
-    #         last_venv = Path(self.manager.last_ide_venv)
-    #         if last_venv.exists() and self.manager._is_venv(last_venv):
-    #             venv_path = last_venv
-    #     
-    #     # 保存本次 IDE 配置供下次快速启动
-    #     self.manager.last_ide_project = current_project
-    #     self.manager.last_ide_venv = str(venv_path) if venv_path else None
-    #     self.manager.save_settings()
-    #     
-    #     # 打开 IDE
-    #     self.safe_log(f"正在启动 IDE: {Path(current_project).name}", "info")
-    #     if venv_path:
-    #         self.safe_log(f"已加载虚拟环境: {venv_path.name}", "success")
-    #     else:
-    #         self.safe_log("使用系统 Python（未检测到虚拟环境）", "info")
-    #     
-    #     MiniIDEWindow(self, current_project, venv_path)
-    #     self.withdraw()
-    # ==================== IDE 功能已禁用结束 ====================
+    # IDE 功能已移除（v7.0+ 专注于环境配置）
 
     def _close_splash_immediately(self):
         global _splash
@@ -2470,8 +2410,9 @@ class App(ctk.CTk):
         p = filedialog.askdirectory()
         if p and self.manager.set_project_path(p):
             self.path_entry.delete(0, "end"); self.path_entry.insert(0, p)
-            folder_name = Path(p).name; safe_name = folder_name.replace(" ", "_") + "_env"
-            self.venv_name_entry.delete(0, "end"); self.venv_name_entry.insert(0, safe_name)
+            folder_name = Path(p).name
+            # 保持默认 .venv 名称，确保 VS Code 等 IDE 能自动识别
+            self.venv_name_entry.delete(0, "end"); self.venv_name_entry.insert(0, ".venv")
             self.refresh_files(); self.check_venv()
             self.safe_log(f"已选择项目: {folder_name}", "success")
     
@@ -2558,19 +2499,18 @@ class App(ctk.CTk):
                     confirm_msg += ", ".join(packages[:5])
                     if len(packages) > 5: confirm_msg += f" 等共 {len(packages)} 个"
                     confirm_msg += f"\n\n{rec_msg}\n\n是否使用推荐版本 Python {rec_ver}？\n（选择'否'将使用当前已配置的 Python）"
-                    
-                    # 在主线程弹窗
-                    use_recommended = [None]  # 用列表存储结果
+
+                    # 使用 Event 等待主线程弹窗结果（避免忙等阻塞）
+                    from threading import Event
+                    confirm_event = Event()
+                    confirm_result = [None]
                     def ask_user():
-                        use_recommended[0] = messagebox.askyesno("智能版本推荐", confirm_msg)
+                        confirm_result[0] = messagebox.askyesno("智能版本推荐", confirm_msg)
+                        confirm_event.set()
                     self.after(0, ask_user)
-                    
-                    # 等待用户响应
-                    import time
-                    while use_recommended[0] is None:
-                        time.sleep(0.1)
-                    
-                    if not use_recommended[0]:
+                    confirm_event.wait()  # 在后台线程等待，不阻塞 GUI
+
+                    if not confirm_result[0]:
                         self.safe_log("用户选择使用当前 Python 配置", "info")
                         recommended_version = None
                 else:
@@ -2610,10 +2550,12 @@ class App(ctk.CTk):
             
             pytorch_source = None  # None = 使用默认 PyPI, 否则使用特定源
             if has_torch:
-                # 在主线程弹窗询问
-                pytorch_choice = [None]  # 用列表存储结果
+                # 使用 Event 等待主线程弹窗结果（避免忙等阻塞）
+                from threading import Event
+                pytorch_event = Event()
+                pytorch_choice = [None]
                 def ask_pytorch():
-                    result = messagebox.askyesnocancel(
+                    pytorch_choice[0] = messagebox.askyesnocancel(
                         "PyTorch 版本选择",
                         "检测到项目需要 PyTorch！\n\n"
                         "请选择安装版本：\n\n"
@@ -2624,16 +2566,9 @@ class App(ctk.CTk):
                         "CPU 版本约 150MB，GPU 版本约 2.5GB。"
                     )
                     pytorch_choice[0] = result
+                    pytorch_event.set()
                 self.after(0, ask_pytorch)
-                
-                # 等待用户响应
-                import time
-                while pytorch_choice[0] is None:
-                    time.sleep(0.1)
-                    if pytorch_choice[0] is not None:
-                        break
-                    # 超时检测（防止死循环）
-                    time.sleep(0.05)
+                pytorch_event.wait()  # 在后台线程等待，不阻塞 GUI
                 
                 if pytorch_choice[0] == True:  # 是 = CPU (推荐)
                     pytorch_source = "https://mirrors.tuna.tsinghua.edu.cn/pytorch-wheels/cpu"
